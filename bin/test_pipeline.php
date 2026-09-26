@@ -189,7 +189,6 @@ $t->section('config: unsupported features fail closed');
 $unsupported = [
     'agent' => fn () => new SecurityConfig(enableAgent: true),
     'dynamic rules' => fn () => new SecurityConfig(enableDynamicRules: true),
-    'geo blocking' => fn () => new SecurityConfig(blockedCountries: ['CN']),
 ];
 foreach ($unsupported as $feature => $fn) {
     $t->throws(UnsupportedFeatureError::class, $fn, "enabling {$feature} throws UnsupportedFeatureError");

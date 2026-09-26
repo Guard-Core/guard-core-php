@@ -3,8 +3,8 @@
 `SecurityConfig` is built through a single constructor of named arguments
 (every field nullable with an engine default). Arguments belonging to features
 this port does not implement, when set to an enabling value, throw
-`UnsupportedFeatureError` (fail closed): geo country blocking, guard
-agent telemetry, and dynamic rules.
+`UnsupportedFeatureError` (fail closed): guard agent telemetry, and dynamic
+rules.
 
 ## CORS
 
@@ -26,6 +26,25 @@ method, headers`), blocked responses compose the CORS headers on top of the
 engine's blocked-response set, and disallowed origins simply get no CORS
 headers (the browser enforces). For pass-through responses the adapter merges
 `GuardEngine::corsResponseHeaders($request)` with its own outgoing headers.
+
+## Geo country rules
+
+| Argument | Default | Notes |
+|---|---|---|
+| `whitelistCountries` | `[]` | ISO country codes, uppercased and deduplicated at construction. Non-empty is restrictive: only listed countries pass, and an unresolved country is denied |
+| `blockedCountries` | `[]` | ISO country codes that are always denied. Ignored while `whitelistCountries` is non-empty (construction warns via `error_log`) |
+| `geoIpDbPath` | `''` | Path to a local MMDB database with top-level `country` records (the ipinfo `country_asn.mmdb` layout). Required when country rules are set and no handler is injected |
+| `geoIpHandler` | `null` | Injected `CountryResolver` (`getCountry(ip): ?string`); replaces the built-in MMDB reader |
+
+Country rules run inside the `ip_security` check: after the global IP lists
+and before the exempt-ips resolution, mirroring the reference
+`check_ip_access`. A global `whitelist` match skips the country stage.
+Loopback IPs are exempt from the country stage. An unresolvable country
+fails closed in allowlist mode and open in blocklist mode. The engine does
+not download databases: provision the MMDB file yourself or inject a
+resolver. Exempt IPs are not exempt from country rules. Route-level country
+rules are deferred (the PHP `RouteConfig` surface has no route-level IP
+rule lists to combine with).
 
 ## Client identity and proxy trust
 

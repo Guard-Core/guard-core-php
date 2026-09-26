@@ -111,6 +111,9 @@ jobs:
       - name: test_cors
         run: php bin/test_cors.php
 
+      - name: test_geo_country
+        run: php bin/test_geo_country.php
+
       - name: test_large_body
         run: php bin/test_large_body.php
 
