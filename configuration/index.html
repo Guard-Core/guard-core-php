@@ -369,6 +369,17 @@
 </li>
       
         <li class="md-nav__item">
+  <a href="#geo-country-rules" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Geo country rules
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
   <a href="#client-identity-and-proxy-trust" class="md-nav__link">
     <span class="md-ellipsis">
       
@@ -513,6 +524,17 @@
 </li>
       
         <li class="md-nav__item">
+  <a href="#geo-country-rules" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Geo country rules
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
   <a href="#client-identity-and-proxy-trust" class="md-nav__link">
     <span class="md-ellipsis">
       
@@ -635,8 +657,8 @@
 <p><code>SecurityConfig</code> is built through a single constructor of named arguments
 (every field nullable with an engine default). Arguments belonging to features
 this port does not implement, when set to an enabling value, throw
-<code>UnsupportedFeatureError</code> (fail closed): geo country blocking, guard
-agent telemetry, and dynamic rules.</p>
+<code>UnsupportedFeatureError</code> (fail closed): guard agent telemetry, and dynamic
+rules.</p>
 <h2 id="cors">CORS</h2>
 <table>
 <thead>
@@ -692,6 +714,47 @@ method, headers</code>), blocked responses compose the CORS headers on top of th
 engine's blocked-response set, and disallowed origins simply get no CORS
 headers (the browser enforces). For pass-through responses the adapter merges
 <code>GuardEngine::corsResponseHeaders($request)</code> with its own outgoing headers.</p>
+<h2 id="geo-country-rules">Geo country rules</h2>
+<table>
+<thead>
+<tr>
+<th>Argument</th>
+<th>Default</th>
+<th>Notes</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>whitelistCountries</code></td>
+<td><code>[]</code></td>
+<td>ISO country codes, uppercased and deduplicated at construction. Non-empty is restrictive: only listed countries pass, and an unresolved country is denied</td>
+</tr>
+<tr>
+<td><code>blockedCountries</code></td>
+<td><code>[]</code></td>
+<td>ISO country codes that are always denied. Ignored while <code>whitelistCountries</code> is non-empty (construction warns via <code>error_log</code>)</td>
+</tr>
+<tr>
+<td><code>geoIpDbPath</code></td>
+<td><code>''</code></td>
+<td>Path to a local MMDB database with top-level <code>country</code> records (the ipinfo <code>country_asn.mmdb</code> layout). Required when country rules are set and no handler is injected</td>
+</tr>
+<tr>
+<td><code>geoIpHandler</code></td>
+<td><code>null</code></td>
+<td>Injected <code>CountryResolver</code> (<code>getCountry(ip): ?string</code>); replaces the built-in MMDB reader</td>
+</tr>
+</tbody>
+</table>
+<p>Country rules run inside the <code>ip_security</code> check: after the global IP lists
+and before the exempt-ips resolution, mirroring the reference
+<code>check_ip_access</code>. A global <code>whitelist</code> match skips the country stage.
+Loopback IPs are exempt from the country stage. An unresolvable country
+fails closed in allowlist mode and open in blocklist mode. The engine does
+not download databases: provision the MMDB file yourself or inject a
+resolver. Exempt IPs are not exempt from country rules. Route-level country
+rules are deferred (the PHP <code>RouteConfig</code> surface has no route-level IP
+rule lists to combine with).</p>
 <h2 id="client-identity-and-proxy-trust">Client identity and proxy trust</h2>
 <table>
 <thead>
