@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace RenzoFranceschini\GuardCore\Routing;
 
+use RenzoFranceschini\GuardCore\Behavior\BehaviorRule;
 use RenzoFranceschini\GuardCore\Cloud\CloudProviderRegistry;
 use RenzoFranceschini\GuardCore\Config\SecurityConfig;
 
@@ -19,6 +20,17 @@ final class RouteConfig
 
     /** @var array<string, array{limit: int, window: int}> */
     public readonly array $geoRateLimits;
+
+    /**
+     * The route's behavior rules (the reference route_config.behavior_rules
+     * list the behavioral decorators append to). Rule arrays are normalized
+     * through BehaviorRule::fromArray; entries failing the reference's
+     * BehaviorRuleConfig constraints are silently dropped (decorator-time
+     * leniency, mirroring the other RouteConfig maps).
+     *
+     * @var list<BehaviorRule>
+     */
+    public readonly array $behaviorRules;
 
     /**
      * @param list<string> $bypassedChecks invalid names are silently dropped
@@ -45,6 +57,7 @@ final class RouteConfig
      */
     public function __construct(
         array $bypassedChecks = [],
+        array $behaviorRules = [],
         public readonly ?int $rateLimit = null,
         public readonly ?int $rateLimitWindow = null,
         array $geoRateLimits = [],
@@ -70,6 +83,15 @@ final class RouteConfig
         ));
         $this->blockCloudProviders = self::validateBlockCloudProviders($blockCloudProviders);
         $this->geoRateLimits = self::validateGeoRateLimits($geoRateLimits);
+        $rules = [];
+        foreach ($behaviorRules as $rule) {
+            try {
+                $rules[] = $rule instanceof BehaviorRule ? $rule : BehaviorRule::fromArray($rule);
+            } catch (\InvalidArgumentException) {
+                continue;
+            }
+        }
+        $this->behaviorRules = $rules;
     }
 
     /**
@@ -132,6 +154,7 @@ final class RouteConfig
     {
         $known = [
             'bypassedChecks' => $this->bypassedChecks,
+            'behaviorRules' => $this->behaviorRules,
             'rateLimit' => $this->rateLimit,
             'rateLimitWindow' => $this->rateLimitWindow,
             'geoRateLimits' => $this->geoRateLimits,

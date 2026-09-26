@@ -139,6 +139,36 @@ foreach ($engine->responseHeaders() as $name => $value) {
 }
 ```
 
+## Behavior rules
+
+Attach behavior rules to a route (or globally with `globalBehaviorRules`):
+`usage`/`frequency` rules count requests the pipeline allowed per (endpoint,
+client) over a sliding window and dispatch `ban`/`log`/`throttle`/`alert`
+when the count exceeds the threshold; `return_pattern` rules match outgoing
+responses (`status:<code>`, `json:<path>==<expected>`, `regex:<pattern>`, or
+a bare substring) and dispatch the same actions. Body-reading patterns
+require `behaviorScanResponseBody: true` (they fail config construction
+otherwise, mirroring the reference's fail-closed check) and read at most
+`behaviorMaxResponseBodyInspectBytes` of the leading body.
+
+```php
+$config = new SecurityConfig(
+    enableRedis: false,
+    behaviorScanResponseBody: true,
+    globalBehaviorRules: [
+        ['rule_type' => 'return_pattern', 'threshold' => 5, 'window' => 60,
+         'pattern' => 'status:404', 'action' => 'ban', 'ban_duration' => 600],
+    ],
+);
+$engine = new GuardEngine($config);
+
+// Route-level rules (usage rules run automatically on allowed requests):
+$engine->execute($request); // tracks routeConfig->behaviorRules usage/frequency
+
+// Response side: adapters call this on every pass-through response:
+$engine->processResponse($request, $response);
+```
+
 ## Detection limits
 
 
