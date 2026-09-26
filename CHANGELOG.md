@@ -3,6 +3,21 @@
 Unreleased
 ----------
 
+Per-route detection exclusions
+------------------------------
+
+### Added
+
+- **Per-route detection exclusion surface: the detection-exclusion fields of the reference `RouteConfig` are now honored by the `suspicious_activity` check instead of being absent.** Ported from guard_core `decorators/route_config.py` (the detection-exclusion fields), `_utils/detection_config.py` (`_resolve_excluded_params`/`_resolve_excluded_body_fields`/`_resolve_enabled_categories`/`_resolve_scan_body`/`_resolve_excluded_headers`) and `core/checks/helpers.py` (`_get_effective_penetration_setting`), structurally following the guard-core-go detection-exclusion resolution: `RouteConfig` gains `enableSuspiciousDetection` (default true), `excludedDetectionHeaders`, `excludedDetectionParams`, `excludedDetectionBodyFields` (null = inherit the global config; a non-null set replaces the global one, the header set being the exception: it always merges the hardcoded proxy-identity defaults with the global set and the route set), `enabledDetectionCategories` (null = inherit; a non-null set replaces the global set, an empty list disables every category like the reference's empty frozenset) and `detectionScanBody` (null = inherit the new global `detectionScanBody` field, default true; a false skips the request-body surface only while the URL path, query and headers still scan). The per-route `enable_suspicious_detection` decorator wins over the global flag for routed requests (route true enables detection even with the global flag off, route false disables it even with the flag on, the reference's `disabled_by_decorator` miss), and the reference's route-aware `applies_to` gate now schedules the check when any registered route enables detection with the global flag off. Entries keep the repo's verbatim-exclusion convention (scan sites lower the scanned name or key and test membership), and route-excluded headers keep the excluded-header ssrf-only skip semantics (they suppress an ssrf address chain only; every other category still scans them). Coverage lives in the new `bin/test_route_detection_exclusions.php` honesty runner (37 assertions: the route kill switch, the factory-level scheduling gate, the per-request gate, each exclusion surface's replace/merge semantics, category narrowing, body-surface skips with the query surface still active, exclusion-scoping and bypass precedence, and config/route `with()` immutability) registered in the Makefile `RUNNERS` list and the CI workflow.
+
+### Deferred
+
+- Engine-level scheduling for route opt-in with the global flag off: the PHP pipeline is built without a route registry (adapters attach `state->routeConfig` per request), so `CheckFactory::buildChecks` is called without route configs and a route enabling detection alone cannot schedule the statically-built check. The route-aware `appliesTo` gate is implemented and pinned at the factory level, mirroring how the geo rate limit surface handled the same shape.
+
+### Verification
+
+- Full suite green on PHP 8.3 (Docker, php:8.3-cli + throwaway redis:7-alpine), mirroring the CI workflow step for step: `composer install`, `make lint` (LINT_OK + `composer validate --strict`), `make test` exit 0 over every runner, and the new `bin/test_route_detection_exclusions.php` 37/37.
+
 Behavior rules
 --------------
 

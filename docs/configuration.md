@@ -47,6 +47,22 @@ custom headers, CRLF rejected, values capped at 8192 bytes, control
 characters sanitized away. Blocked responses carry the headers engine-side;
 pass-through responses take `GuardEngine::responseHeaders()`.
 
+### Per-route detection exclusions
+
+`RouteConfig` mirrors the reference detection-exclusion fields:
+`enableSuspiciousDetection` (default true; wins over the global
+`enablePenetrationDetection` for routed requests), `excludedDetectionParams`,
+`excludedDetectionBodyFields`, `excludedDetectionHeaders`,
+`enabledDetectionCategories` and `detectionScanBody`. A null field inherits
+the global config; a non-null set replaces the global one, except the header
+set which always merges the hardcoded proxy-identity defaults with the
+global set and the route set (suppressing ssrf address-chain false positives
+only). A false `detectionScanBody` skips the request-body surface while the
+URL path, query and headers still scan. Scheduling note: the engine's
+statically-built pipeline schedules the check from the global flag; the
+route-aware scheduling gate lives at the `CheckFactory` level (see
+KNOWN_GAPS).
+
 ## Behavior rules
 
 | Argument | Default | Notes |

@@ -33,6 +33,45 @@ final class RouteConfig
     public readonly array $behaviorRules;
 
     /**
+     * Per-route detection exclusion surface, mirrored from the reference
+     * route_config fields and resolved with the _resolve_* helpers of
+     * guard_core/_utils/detection_config.py. A null field means "inherit
+     * the global config" for that surface; a non-null value replaces the
+     * global one (the header exclusion set is the exception: it always
+     * merges the hardcoded defaults with the global set and the route
+     * set). Entries keep the same verbatim convention as the global
+     * exclusion sets: scan sites lower the scanned name or key and test
+     * membership against the untouched entries.
+     */
+    public readonly bool $enableSuspiciousDetection;
+
+    /** @var list<string>|null */
+    public readonly ?array $excludedDetectionHeaders;
+
+    /** @var list<string>|null */
+    public readonly ?array $excludedDetectionParams;
+
+    /** @var list<string>|null */
+    public readonly ?array $excludedDetectionBodyFields;
+
+    /**
+     * When non-null, replaces the global enabled category set for this
+     * route (an empty list disables every category, like the reference's
+     * empty frozenset). Entries are kept verbatim: an unknown category
+     * simply never matches a threat category.
+     *
+     * @var list<string>|null
+     */
+    public readonly ?array $enabledDetectionCategories;
+
+    /**
+     * When non-null, overrides the reference detection_scan_body default
+     * (true): a false skips the body surface while the URL path, query and
+     * headers still scan.
+     */
+    public readonly ?bool $detectionScanBody;
+
+    /**
      * @param list<string> $bypassedChecks invalid names are silently dropped
      *     (decorator-time leniency); valid names update the config
      * @param list<string> $blockedUserAgents
@@ -58,6 +97,12 @@ final class RouteConfig
     public function __construct(
         array $bypassedChecks = [],
         array $behaviorRules = [],
+        bool $enableSuspiciousDetection = true,
+        ?array $excludedDetectionHeaders = null,
+        ?array $excludedDetectionParams = null,
+        ?array $excludedDetectionBodyFields = null,
+        ?array $enabledDetectionCategories = null,
+        ?bool $detectionScanBody = null,
         public readonly ?int $rateLimit = null,
         public readonly ?int $rateLimitWindow = null,
         array $geoRateLimits = [],
@@ -92,6 +137,33 @@ final class RouteConfig
             }
         }
         $this->behaviorRules = $rules;
+        $this->enableSuspiciousDetection = $enableSuspiciousDetection;
+        $this->excludedDetectionHeaders = self::stringListOrNull($excludedDetectionHeaders);
+        $this->excludedDetectionParams = self::stringListOrNull($excludedDetectionParams);
+        $this->excludedDetectionBodyFields = self::stringListOrNull($excludedDetectionBodyFields);
+        $this->enabledDetectionCategories = self::stringListOrNull($enabledDetectionCategories);
+        $this->detectionScanBody = $detectionScanBody;
+    }
+
+    /**
+     * Non-string entries are silently dropped (decorator-time leniency,
+     * mirroring the other RouteConfig lists).
+     *
+     * @return list<string>|null
+     */
+    private static function stringListOrNull(?array $entries): ?array
+    {
+        if ($entries === null) {
+            return null;
+        }
+        $out = [];
+        foreach ($entries as $entry) {
+            if (is_string($entry)) {
+                $out[] = $entry;
+            }
+        }
+
+        return $out;
     }
 
     /**
@@ -155,6 +227,12 @@ final class RouteConfig
         $known = [
             'bypassedChecks' => $this->bypassedChecks,
             'behaviorRules' => $this->behaviorRules,
+            'enableSuspiciousDetection' => $this->enableSuspiciousDetection,
+            'excludedDetectionHeaders' => $this->excludedDetectionHeaders,
+            'excludedDetectionParams' => $this->excludedDetectionParams,
+            'excludedDetectionBodyFields' => $this->excludedDetectionBodyFields,
+            'enabledDetectionCategories' => $this->enabledDetectionCategories,
+            'detectionScanBody' => $this->detectionScanBody,
             'rateLimit' => $this->rateLimit,
             'rateLimitWindow' => $this->rateLimitWindow,
             'geoRateLimits' => $this->geoRateLimits,

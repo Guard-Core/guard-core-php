@@ -15,6 +15,7 @@ use RenzoFranceschini\GuardCore\Pipeline\SecurityCheck;
 use RenzoFranceschini\GuardCore\Request\GuardRequest;
 use RenzoFranceschini\GuardCore\Request\GuardResponse;
 use RenzoFranceschini\GuardCore\Request\GuardResponseFactory;
+use RenzoFranceschini\GuardCore\Routing\RouteConfig;
 use RenzoFranceschini\GuardCore\Routing\RouteResolver;
 
 final class SuspiciousActivityCheck extends SecurityCheck
@@ -50,7 +51,22 @@ final class SuspiciousActivityCheck extends SecurityCheck
 
     public function appliesTo(SecurityConfig $config, ?array $routeConfigs): bool
     {
-        return $config->enablePenetrationDetection;
+        // The reference route_config_applies gate: the check also runs when
+        // any registered route enables per-route detection (the RouteConfig
+        // default), even with the global flag off.
+        if ($config->enablePenetrationDetection) {
+            return true;
+        }
+        if ($routeConfigs === null) {
+            return false;
+        }
+        foreach ($routeConfigs as $routeConfig) {
+            if ($routeConfig->enableSuspiciousDetection) {
+                return true;
+            }
+        }
+
+        return false;
     }
 
     public function check(GuardRequest $request): ?GuardResponse
@@ -60,9 +76,25 @@ final class SuspiciousActivityCheck extends SecurityCheck
             return null;
         }
 
-        if ($this->routeResolver->shouldBypassCheck('penetration', $request->state()->routeConfig)) {
+        $routeConfig = $request->state()->routeConfig;
+        if ($this->routeResolver->shouldBypassCheck('penetration', $routeConfig)) {
             return null;
         }
+
+        // The per-route enable_suspicious_detection decorator wins over the
+        // global flag for routed requests (_get_effective_penetration_setting,
+        // guard_core/core/checks/helpers.py): route true enables detection on
+        // this route even when the global flag is off, route false disables
+        // it even when the global flag is on (the reference's
+        // disabled_by_decorator miss; the decorator-violation event rides
+        // the documented event deferral).
+        $penetrationEnabled = $routeConfig !== null
+            ? $routeConfig->enableSuspiciousDetection
+            : $this->config->enablePenetrationDetection;
+        if (!$penetrationEnabled) {
+            return null;
+        }
+        $enabledCategories = $this->resolveEnabledCategories($routeConfig);
 
         $categories = [];
         foreach ($this->scanValues($request) as [$content, $context, $forcedCategory, $skipCategories]) {
@@ -70,7 +102,7 @@ final class SuspiciousActivityCheck extends SecurityCheck
                 // JSON mongo-operator keys report straight from the walk
                 // (body_json_scan._mongo_operator_key_hit) without a pattern
                 // scan.
-                if (isset($this->config->enabledDetectionCategories[$forcedCategory])
+                if (isset($enabledCategories[$forcedCategory])
                     && !isset($skipCategories[$forcedCategory])
                     && !in_array($forcedCategory, $categories, true)
                 ) {
@@ -84,7 +116,7 @@ final class SuspiciousActivityCheck extends SecurityCheck
                     $category = $threat['category'] ?? 'custom';
                     if (!in_array($category, $categories, true)
                         && !isset($skipCategories[$category])
-                        && isset($this->config->enabledDetectionCategories[$category])
+                        && isset($enabledCategories[$category])
                     ) {
                         $categories[] = $category;
                     }
@@ -167,11 +199,41 @@ final class SuspiciousActivityCheck extends SecurityCheck
      *
      * @return list<array{string, string, ?string, array<string, true>}>
      */
+    /**
+     * Mirrors _resolve_enabled_categories: a non-null route category set
+     * replaces the global one (an empty list disables every category).
+     *
+     * @return array<string, true>
+     */
+    private function resolveEnabledCategories(?RouteConfig $routeConfig): array
+    {
+        $routeCategories = $routeConfig?->enabledDetectionCategories;
+
+        return $routeCategories !== null
+            ? array_fill_keys($routeCategories, true)
+            : $this->config->enabledDetectionCategories;
+    }
+
     private function scanValues(GuardRequest $request): array
     {
         $values = [[$request->urlPath(), 'url_path', null, []]];
-        $excludedParams = $this->config->excludedDetectionParams;
-        $excludedBodyFields = $this->config->excludedDetectionBodyFields;
+        $routeConfig = $request->state()->routeConfig;
+        // The per-route exclusion surfaces, resolved with the reference's
+        // _resolve_* helpers (guard_core/_utils/detection_config.py): a
+        // non-null route set replaces the global one, the header set always
+        // merges defaults + global + route, and a non-null route
+        // detection_scan_body overrides the global default.
+        $routeParams = $routeConfig?->excludedDetectionParams;
+        $excludedParams = $routeParams !== null ? array_fill_keys($routeParams, true) : $this->config->excludedDetectionParams;
+        $routeBodyFields = $routeConfig?->excludedDetectionBodyFields;
+        $excludedBodyFields = $routeBodyFields !== null ? array_fill_keys($routeBodyFields, true) : $this->config->excludedDetectionBodyFields;
+        $routeExcludedHeaders = $routeConfig?->excludedDetectionHeaders ?? [];
+        $excludedHeaders = HeaderExclusions::mergedExcludedNames(array_merge(
+            $this->config->excludedDetectionHeaders,
+            array_fill_keys($routeExcludedHeaders, true)
+        ));
+        $enabledCategories = $this->resolveEnabledCategories($routeConfig);
+        $scanBody = $routeConfig?->detectionScanBody ?? $this->config->detectionScanBody;
         foreach ($request->queryParams() as $name => $value) {
             if (isset($excludedParams[strtolower((string) $name)])) {
                 continue;
@@ -183,7 +245,6 @@ final class SuspiciousActivityCheck extends SecurityCheck
             }
         }
         $headers = $request->headers();
-        $excludedHeaders = HeaderExclusions::mergedExcludedNames($this->config->excludedDetectionHeaders);
         foreach ($headers->all() as $name => $value) {
             if (isset($this->config->logSensitiveHeaders[strtolower($name)])) {
                 continue;
@@ -196,7 +257,7 @@ final class SuspiciousActivityCheck extends SecurityCheck
             }
         }
         $body = $request->body();
-        if ($body !== '') {
+        if ($body !== '' && $scanBody) {
             $contentType = $headers->get('content-type') ?? '';
             foreach (BodyFormScan::bodyScanEntries($body, $contentType, $this->config->detectionBinaryMinRunLength, $excludedBodyFields) as [$content, $context, $forcedCategory]) {
                 $values[] = [$content, $context, $forcedCategory, []];
