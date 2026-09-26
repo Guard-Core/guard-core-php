@@ -104,6 +104,41 @@ foreach ($engine->corsResponseHeaders($request) as $name => $value) {
 }
 ```
 
+## Security headers
+
+By default the engine computes the reference security header set (port of
+guard-core `handlers/security_headers_handler.py`): the ten class defaults
+(`X-Content-Type-Options: nosniff`, `X-Frame-Options: SAMEORIGIN`,
+`X-XSS-Protection: 1; mode=block`,
+`Referrer-Policy: strict-origin-when-cross-origin`,
+`Permissions-Policy: geolocation=(), microphone=(), camera=()`,
+`X-Permitted-Cross-Domain-Policies: none`, `X-Download-Options: noopen`, COEP/COOP/CORP
+`require-corp`/`same-origin`/`same-origin`) plus
+`Strict-Transport-Security: max-age=31536000; includeSubDomains`. Blocked
+responses carry the headers engine-side (the fail-secure 500s included), and
+blocked responses compose them with the CORS verdict headers when CORS is
+enabled. For pass-through responses the adapter merges
+`GuardEngine::responseHeaders()` with its outgoing headers. Setting
+`securityHeaders: ['enabled' => false]` removes every security header.
+
+```php
+$config = new SecurityConfig(
+    enableRedis: false,
+    securityHeaders: [
+        'enabled' => true,
+        'hsts' => ['max_age' => 31536000, 'include_subdomains' => true, 'preload' => false],
+        'csp' => ['default-src' => ["'self'"]],
+        'frame_options' => 'DENY',          // null keeps the class default
+        'permissions_policy' => 'geolocation=(self)', // '' removes the header
+        'custom' => ['X-Request-Id' => 'trace'],      // lands last, may override anything
+    ],
+);
+$engine = new GuardEngine($config);
+foreach ($engine->responseHeaders() as $name => $value) {
+    $response = $response->withHeader($name, $value);
+}
+```
+
 ## Detection limits
 
 

@@ -8,6 +8,7 @@ use RenzoFranceschini\GuardCore\Cloud\CloudProviderRegistry;
 use RenzoFranceschini\GuardCore\GeoIp\CountryResolver;
 use RenzoFranceschini\GuardCore\GeoIp\GeoIpManager;
 use RenzoFranceschini\GuardCore\Ip\CanonicalIp;
+use RenzoFranceschini\GuardCore\SecurityHeaders\SecurityHeadersPolicy;
 
 final class SecurityConfig
 {
@@ -135,6 +136,8 @@ final class SecurityConfig
 
     public readonly bool $enforceHttps;
 
+    public readonly SecurityHeadersPolicy $securityHeaders;
+
     /** @var list<string> */
     public readonly array $blockedUserAgents;
 
@@ -213,6 +216,8 @@ final class SecurityConfig
      * @param list<string> $corsAllowMethods uppercased at construction; an empty list falls back to ['GET'] at policy build
      * @param list<string> $corsAllowHeaders lowercased at construction; '*' echoes the requested headers verbatim
      * @param list<string> $corsExposeHeaders joined into Access-Control-Expose-Headers on responses
+     * @param bool|null $enforceHttps unsupported when true (fail closed)
+     * @param SecurityHeadersPolicy|array<string, mixed>|null $securityHeaders reference-shaped security_headers block (enabled, hsts, csp, frame_options, content_type_options, xss_protection, referrer_policy, permissions_policy, custom); invalid custom header names or values fail construction like the reference configure() raising
      * @param list<string> $blockedCountries unsupported when non-empty
      * @param list<string> $whitelistCountries unsupported when non-empty
      * @param list<string> $blockCloudProviders selectors "Provider" or "Provider:!region", unknown provider names rejected
@@ -262,6 +267,7 @@ final class SecurityConfig
         ?bool $emergencyMode = null,
         ?array $emergencyWhitelist = null,
         ?bool $enforceHttps = null,
+        SecurityHeadersPolicy|array|null $securityHeaders = null,
         ?array $customErrorResponses = null,
         ?array $blockedUserAgents = null,
         ?bool $enableCors = null,
@@ -332,6 +338,15 @@ final class SecurityConfig
         $this->emergencyWhitelist = $this->validateIpCidrList($emergencyWhitelist ?? [], 'emergency_whitelist');
         $this->emergencyMode = $emergencyMode ?? false;
         $this->enforceHttps = $enforceHttps ?? false;
+        // Security headers surface, mirrored from the reference
+        // security_headers dict field (_security_config_fields.py) and its
+        // SecurityHeadersManager resolution. A policy instance passes
+        // through; an array is normalized and validated fail-closed here
+        // (the reference configure() raising out of _validate_header_name /
+        // _validate_header_value); null builds the reference default block.
+        $this->securityHeaders = $securityHeaders instanceof SecurityHeadersPolicy
+            ? $securityHeaders
+            : new SecurityHeadersPolicy($securityHeaders);
         $this->blockedUserAgents = $this->validateBlockedUserAgents($blockedUserAgents ?? []);
         $this->blockCloudProviders = $this->validateBlockCloudProviders($blockCloudProviders);
         $this->cloudIpRefreshInterval = max(
@@ -599,6 +614,7 @@ final class SecurityConfig
             'emergencyWhitelist' => $this->emergencyWhitelist,
             'emergencyMode' => $this->emergencyMode,
             'enforceHttps' => $this->enforceHttps,
+            'securityHeaders' => $this->securityHeaders,
             'blockedUserAgents' => $this->blockedUserAgents,
             'enableCors' => $this->enableCors,
             'corsAllowOrigins' => $this->corsAllowOrigins,

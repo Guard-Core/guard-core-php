@@ -114,6 +114,9 @@ jobs:
       - name: test_geo_country
         run: php bin/test_geo_country.php
 
+      - name: test_security_headers
+        run: php bin/test_security_headers.php
+
       - name: test_large_body
         run: php bin/test_large_body.php
 
