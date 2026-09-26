@@ -69,7 +69,8 @@ final class GuardEngine
             $this->banManager,
             $this->rateLimitHandler,
             null,
-            $this->cloudManager
+            $this->cloudManager,
+            $config->geoIpHandler
         );
         $this->pipeline = new SecurityCheckPipeline(
             $checkFactory->buildChecks($config),

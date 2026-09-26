@@ -5,6 +5,8 @@ declare(strict_types=1);
 namespace RenzoFranceschini\GuardCore\Config;
 
 use RenzoFranceschini\GuardCore\Cloud\CloudProviderRegistry;
+use RenzoFranceschini\GuardCore\GeoIp\CountryResolver;
+use RenzoFranceschini\GuardCore\GeoIp\GeoIpManager;
 use RenzoFranceschini\GuardCore\Ip\CanonicalIp;
 
 final class SecurityConfig
@@ -162,6 +164,16 @@ final class SecurityConfig
 
     public readonly int $corsMaxAge;
 
+    /** @var list<string> */
+    public readonly array $whitelistCountries;
+
+    /** @var list<string> */
+    public readonly array $blockedCountries;
+
+    public readonly ?CountryResolver $geoIpHandler;
+
+    public readonly string $geoIpDbPath;
+
     public readonly ?string $logSuspiciousLevel;
 
     public readonly ?string $logRequestLevel;
@@ -193,6 +205,10 @@ final class SecurityConfig
      * @param list<string> $emergencyWhitelist
      * @param array<int, string> $customErrorResponses per-status-code body overrides
      * @param list<string> $blockedUserAgents regex patterns, subject truncated to 512 chars
+     * @param list<string> $blockedCountries ISO country codes denied by the ip_security check; uppercased and deduplicated; ignored (with a warning) while $whitelistCountries is non-empty; requires a geo resolver (fail closed)
+     * @param list<string> $whitelistCountries restrictive allowlist: only listed countries pass and an unresolved country is denied; uppercased and deduplicated; requires a geo resolver (fail closed)
+     * @param string $geoIpDbPath path to a local MMDB database with top-level `country` records; builds the built-in GeoIpManager when no $geoIpHandler is injected
+     * @param CountryResolver|null $geoIpHandler injected country resolver; replaces the built-in MMDB reader
      * @param list<string> $corsAllowOrigins exact origins; '*' allows every origin (incompatible with $corsAllowCredentials, fail-closed)
      * @param list<string> $corsAllowMethods uppercased at construction; an empty list falls back to ['GET'] at policy build
      * @param list<string> $corsAllowHeaders lowercased at construction; '*' echoes the requested headers verbatim
@@ -239,6 +255,8 @@ final class SecurityConfig
         ?\Closure $onBlock = null,
         array $blockedCountries = [],
         array $whitelistCountries = [],
+        string $geoIpDbPath = '',
+        ?CountryResolver $geoIpHandler = null,
         array $blockCloudProviders = [],
         ?int $cloudIpRefreshInterval = null,
         ?bool $emergencyMode = null,
@@ -359,8 +377,38 @@ final class SecurityConfig
         }
 
         if ($blockedCountries !== [] || $whitelistCountries !== []) {
-            throw new UnsupportedFeatureError('geo country blocking');
+            // Country rules with no resolver fail construction, mirroring
+            // the reference `_resolve_geo_ip_handler` raising
+            // "geo_ip_handler is required" (guard-core-go #23 carries the
+            // same fail-closed default; a database path builds the
+            // built-in GeoIpManager).
+            $this->geoIpHandler = $geoIpHandler
+                ?? ($geoIpDbPath !== '' ? new GeoIpManager($geoIpDbPath) : null);
+            if ($this->geoIpHandler === null) {
+                throw new \InvalidArgumentException(
+                    'geo_ip_handler is required if blocked_countries or whitelist_countries is set'
+                    . " (set geo_ip_db_path to an MMDB database or inject a geo_ip_handler)"
+                );
+            }
+            if ($blockedCountries !== [] && $whitelistCountries !== []) {
+                // The reference warns (UserWarning) instead of erroring:
+                // the allowlist is restrictive and shadows the blocklist.
+                // The PHP config has no warn channel, so the warning rides
+                // the global error_log like guard-core-go's log.Printf.
+                error_log(
+                    'blocked_countries is ignored when whitelist_countries is non-empty:'
+                    . ' a non-empty whitelist_countries is restrictive (only listed countries pass),'
+                    . ' so blocked_countries has no effect. Use one or the other.'
+                );
+            }
+            $this->whitelistCountries = $this->normalizeCountryList($whitelistCountries);
+            $this->blockedCountries = $this->normalizeCountryList($blockedCountries);
+        } else {
+            $this->whitelistCountries = [];
+            $this->blockedCountries = [];
+            $this->geoIpHandler = null;
         }
+        $this->geoIpDbPath = $geoIpDbPath;
         if ($enableAgent === true) {
             throw new UnsupportedFeatureError('guard agent telemetry');
         }
@@ -368,6 +416,32 @@ final class SecurityConfig
             throw new UnsupportedFeatureError('dynamic rules');
         }
         $this->customRequestCheck = $customRequestCheck;
+    }
+
+    /**
+     * Mirrors the reference coerce_country_set
+     * (guard_core/_security_config_geo_validators.py): every entry is
+     * uppercased and duplicates collapse (frozenset semantics, first-seen
+     * order preserved). ISO codes are not format-validated, exactly like
+     * the reference.
+     *
+     * @param list<string> $entries @return list<string>
+     */
+    private function normalizeCountryList(array $entries): array
+    {
+        $out = [];
+        foreach ($entries as $entry) {
+            if (!is_string($entry)) {
+                $shown = get_debug_type($entry);
+                throw new \InvalidArgumentException("countries: entries must be strings, got {$shown}");
+            }
+            $code = strtoupper($entry);
+            if (!in_array($code, $out, true)) {
+                $out[] = $code;
+            }
+        }
+
+        return $out;
     }
 
     /** @param list<mixed> $entries @return list<string> */
@@ -533,6 +607,10 @@ final class SecurityConfig
             'corsAllowCredentials' => $this->corsAllowCredentials,
             'corsExposeHeaders' => $this->corsExposeHeaders,
             'corsMaxAge' => $this->corsMaxAge,
+            'blockedCountries' => $this->blockedCountries,
+            'whitelistCountries' => $this->whitelistCountries,
+            'geoIpDbPath' => $this->geoIpDbPath,
+            'geoIpHandler' => $this->geoIpHandler,
             'blockCloudProviders' => $this->blockCloudProviders,
             'cloudIpRefreshInterval' => $this->cloudIpRefreshInterval,
             'authVerifier' => $this->authVerifier,

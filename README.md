@@ -58,7 +58,29 @@ $request->state()->routeConfig = new RouteConfig(
 );
 ```
 
-A request from a resolved country enforces that country's tier first (`'*'` when the country is missing from the map, nothing when neither matches), the tier shares the route's hashed bucket, and exempt and whitelisted clients still skip the check entirely. Geo country blocking (`blocked_countries`/`whitelist_countries`) remains unsupported.
+A request from a resolved country enforces that country's tier first (`'*'` when the country is missing from the map, nothing when neither matches), the tier shares the route's hashed bucket, and exempt and whitelisted clients still skip the check entirely.
+
+## Geo country blocking
+
+Set `blockedCountries` and/or `whitelistCountries` and the `ip_security` check enforces them after the global IP lists: a non-empty `whitelistCountries` is restrictive (only listed countries pass, an unresolved country is denied), `blockedCountries` denies its matches, loopback IPs are exempt, and a global `whitelist` match skips the country stage entirely. Country rules with no resolver fail config construction: point `geoIpDbPath` at a locally provisioned MMDB file with top-level `country` records (the ipinfo `country_asn.mmdb` layout) or inject a `CountryResolver`. The engine never downloads databases.
+
+```php
+use RenzoFranceschini\GuardCore\GeoIp\CountryResolver;
+
+final class MyGeoIp implements CountryResolver
+{
+    public function getCountry(string $ip): ?string
+    {
+        return $this->mmdb->countryOf($ip); // your lookup, null when unresolved
+    }
+}
+
+$config = new SecurityConfig(
+    enableRedis: false,
+    blockedCountries: ['CN', 'RU'],
+    geoIpDbPath: __DIR__ . '/country_asn.mmdb', // or geoIpHandler: new MyGeoIp(),
+);
+```
 
 ## CORS
 

@@ -215,7 +215,6 @@ $t->same(['AWS'], (new SecurityConfig())->with(['block_cloud_providers' => ['AWS
 $t->throws(\InvalidArgumentException::class, fn () => new SecurityConfig(blockCloudProviders: ['AWSX']), 'unknown provider name rejected');
 $t->throws(\InvalidArgumentException::class, fn () => new SecurityConfig(blockCloudProviders: ['aws']), 'provider names case-sensitive');
 $t->throws(\InvalidArgumentException::class, fn () => new SecurityConfig(blockCloudProviders: ['Foo:!region']), 'carve-out on unknown provider rejected');
-$t->throws(UnsupportedFeatureError::class, fn () => new SecurityConfig(blockedCountries: ['CN']), 'geo country blocking still fail-closed');
 $t->throws(UnsupportedFeatureError::class, fn () => new SecurityConfig(enableDynamicRules: true), 'dynamic rules still fail-closed');
 $t->same(true, (new SecurityConfig(blockCloudProviders: ['AWS']))->cloudBlockingEnabled(), 'cloudBlockingEnabled true with providers');
 $t->same(false, (new SecurityConfig())->cloudBlockingEnabled(), 'cloudBlockingEnabled false without providers');
