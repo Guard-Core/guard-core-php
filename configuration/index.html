@@ -358,6 +358,17 @@
     <ul class="md-nav__list" data-md-component="toc" data-md-scrollfix>
       
         <li class="md-nav__item">
+  <a href="#cors" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        CORS
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
   <a href="#client-identity-and-proxy-trust" class="md-nav__link">
     <span class="md-ellipsis">
       
@@ -491,6 +502,17 @@
     <ul class="md-nav__list" data-md-component="toc" data-md-scrollfix>
       
         <li class="md-nav__item">
+  <a href="#cors" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        CORS
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
   <a href="#client-identity-and-proxy-trust" class="md-nav__link">
     <span class="md-ellipsis">
       
@@ -613,8 +635,63 @@
 <p><code>SecurityConfig</code> is built through a single constructor of named arguments
 (every field nullable with an engine default). Arguments belonging to features
 this port does not implement, when set to an enabling value, throw
-<code>UnsupportedFeatureError</code> (fail closed): geo country blocking, CORS, guard
+<code>UnsupportedFeatureError</code> (fail closed): geo country blocking, guard
 agent telemetry, and dynamic rules.</p>
+<h2 id="cors">CORS</h2>
+<table>
+<thead>
+<tr>
+<th>Argument</th>
+<th>Default</th>
+<th>Notes</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>enableCors</code></td>
+<td><code>false</code></td>
+<td>Enables the CORS handler over the engine</td>
+</tr>
+<tr>
+<td><code>corsAllowOrigins</code></td>
+<td><code>['*']</code></td>
+<td>Exact origins; <code>*</code> allows every origin</td>
+</tr>
+<tr>
+<td><code>corsAllowMethods</code></td>
+<td><code>GET, POST, PUT, PATCH, DELETE, OPTIONS</code></td>
+<td>Uppercased at config time; an empty list falls back to <code>GET</code></td>
+</tr>
+<tr>
+<td><code>corsAllowHeaders</code></td>
+<td><code>['*']</code></td>
+<td>Lowercased at config time; <code>*</code> echoes the requested headers verbatim</td>
+</tr>
+<tr>
+<td><code>corsAllowCredentials</code></td>
+<td><code>false</code></td>
+<td>Incompatible with the <code>*</code> origin: that combination fails config construction</td>
+</tr>
+<tr>
+<td><code>corsExposeHeaders</code></td>
+<td><code>[]</code></td>
+<td>Joined into <code>Access-Control-Expose-Headers</code> on responses</td>
+</tr>
+<tr>
+<td><code>corsMaxAge</code></td>
+<td><code>600</code></td>
+<td>A configured <code>0</code> falls back to <code>600</code></td>
+</tr>
+</tbody>
+</table>
+<p>Behavior mirrors the reference <code>CorsHandler</code> (guard-core
+<code>handlers/cors_handler.py</code>) and the adapter dispatch: a preflight (OPTIONS
+carrying <code>Access-Control-Request-Method</code>) executes the security pipeline and
+is then short-circuited with <code>200 OK</code> (or <code>400 Disallowed CORS: origin,
+method, headers</code>), blocked responses compose the CORS headers on top of the
+engine's blocked-response set, and disallowed origins simply get no CORS
+headers (the browser enforces). For pass-through responses the adapter merges
+<code>GuardEngine::corsResponseHeaders($request)</code> with its own outgoing headers.</p>
 <h2 id="client-identity-and-proxy-trust">Client identity and proxy trust</h2>
 <table>
 <thead>
