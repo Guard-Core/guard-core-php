@@ -7,6 +7,7 @@ namespace RenzoFranceschini\GuardCore\Engine;
 use RenzoFranceschini\GuardCore\Ban\IpBanManager;
 use RenzoFranceschini\GuardCore\Cloud\CloudManager;
 use RenzoFranceschini\GuardCore\Config\SecurityConfig;
+use RenzoFranceschini\GuardCore\Cors\CorsPolicy;
 use RenzoFranceschini\GuardCore\Pipeline\BlockEvents;
 use RenzoFranceschini\GuardCore\Pipeline\CheckFactory;
 use RenzoFranceschini\GuardCore\Pipeline\SecurityCheckPipeline;
@@ -32,6 +33,8 @@ final class GuardEngine
     private readonly RateLimitHandler $rateLimitHandler;
 
     private readonly ?CloudManager $cloudManager;
+
+    private readonly ?CorsPolicy $corsPolicy;
 
     private readonly GuardResponseFactory $responseFactory;
 
@@ -59,6 +62,7 @@ final class GuardEngine
         $this->banManager = new IpBanManager($config->trustedProxies, $warn);
         $this->rateLimitHandler = new RateLimitHandler(self::rateLimitConfig($config), warn: $warn);
         $this->cloudManager = $cloudManager ?? ($config->cloudBlockingEnabled() ? new CloudManager() : null);
+        $this->corsPolicy = CorsPolicy::forConfig($config);
         $checkFactory = new CheckFactory(
             $this->responseFactory,
             new RouteResolver(),
@@ -120,6 +124,11 @@ final class GuardEngine
         return $this->cloudManager;
     }
 
+    public function corsPolicy(): ?CorsPolicy
+    {
+        return $this->corsPolicy;
+    }
+
     public function responseFactory(): GuardResponseFactory
     {
         return $this->responseFactory;
@@ -151,21 +160,68 @@ final class GuardEngine
         $this->cloudManager?->initializeRedis($this->redis, ttl: $this->config->cloudIpRefreshInterval);
     }
 
+    /**
+     * Runs the security pipeline. With CORS enabled it mirrors the
+     * reference adapter dispatch (fastapi-guard guard/middleware.py): a
+     * preflight request executes the pipeline first and is then answered
+     * by the CORS policy's short-circuit (200 "OK" or 400 "Disallowed
+     * CORS: ..."), and every blocked response composes the CORS verdict
+     * headers exactly like _inject_cors_headers.
+     */
     public function execute(GuardRequest $request): ?GuardResponse
     {
         $state = $request->state();
+        $cors = $this->corsPolicy;
+        $preflight = $cors !== null && CorsPolicy::isPreflight($request);
 
-        if ($this->isPathExcluded($request->urlPath())) {
+        // The reference dispatch runs the preflight branch before the
+        // passthrough handler marks the request exclusion-scoped, so the
+        // pipeline executes unscoped for preflights.
+        if (!$preflight && $this->isPathExcluded($request->urlPath())) {
             $state->guardExclusionScoped = true;
         } elseif ($request->clientHost() === null) {
             $clientIp = ClientIpResolver::extract($request, $this->config);
             $state->clientIp = $clientIp;
             if ($clientIp === ClientIpResolver::UNKNOWN_CLIENT_IDENTITY && $this->config->failSecure) {
-                return $this->unresolvableClientResponse($request);
+                $response = $this->unresolvableClientResponse($request);
+                $cors?->injectResponseHeaders($response, $request->headers());
+
+                return $response;
             }
         }
 
-        return $this->pipeline->execute($request);
+        $response = $this->pipeline->execute($request);
+
+        if ($cors === null) {
+            return $response;
+        }
+        if ($response !== null) {
+            $cors->injectResponseHeaders($response, $request->headers());
+
+            return $response;
+        }
+
+        return $preflight ? $cors->buildPreflightResponse($request, $this->responseFactory) : null;
+    }
+
+    /**
+     * Computes the CORS headers an adapter must put on a normal
+     * (pass-through) response for this request, mirroring the reference
+     * _inject_cors_headers over CorsHandler.build_response_headers. It
+     * returns [] when CORS is disabled, when the request carries no Origin
+     * header, or when the origin is disallowed (the browser enforces the
+     * policy). Blocked responses returned from execute() already carry
+     * these headers.
+     *
+     * @return array<string, string>
+     */
+    public function corsResponseHeaders(GuardRequest $request): array
+    {
+        if ($this->corsPolicy === null) {
+            return [];
+        }
+
+        return $this->corsPolicy->buildResponseHeaders($request->headers());
     }
 
     private function unresolvableClientResponse(GuardRequest $request): GuardResponse

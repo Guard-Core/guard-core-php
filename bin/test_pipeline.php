@@ -187,7 +187,6 @@ $t->same(null, (new SecurityConfig())->logRequestLevel, 'log_request_level defau
 
 $t->section('config: unsupported features fail closed');
 $unsupported = [
-    'CORS' => fn () => new SecurityConfig(enableCors: true),
     'agent' => fn () => new SecurityConfig(enableAgent: true),
     'dynamic rules' => fn () => new SecurityConfig(enableDynamicRules: true),
     'geo blocking' => fn () => new SecurityConfig(blockedCountries: ['CN']),

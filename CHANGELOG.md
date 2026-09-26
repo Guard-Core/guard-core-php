@@ -1,5 +1,19 @@
 # Release Notes
 
+Unreleased
+----------
+
+CORS support
+------------
+
+### Added
+
+- **CORS support: the engine now runs the reference `CorsHandler` and its preflight short-circuit instead of fail-closed rejecting `enableCors`.** Ported from guard_core `handlers/cors_handler.py` with the field defaults of the `cors_*` SecurityConfig fields (`_security_config_fields.py`): `enableCors` plus `corsAllowOrigins` (default `['*']`), `corsAllowMethods` (default `GET, POST, PUT, PATCH, DELETE, OPTIONS`, uppercased at construction, an empty list falling back to `['GET']` like the reference `or` default), `corsAllowHeaders` (default `['*']`, lowercased), `corsAllowCredentials`, `corsExposeHeaders`, and `corsMaxAge` (default `600`, a configured `0` falling back like `config.cors_max_age or 600`). The wildcard-origin plus credentials misconfiguration fails config construction with the reference message (`CORS misconfiguration: wildcard origin '*' is incompatible with cors_allow_credentials=True`), and `with()` re-validates the copy. Dispatch mirrors the adapter contract (fastapi-guard `guard/middleware.py` `_handle_preflight` / `_inject_cors_headers`), structurally following guard-core-go #24: a preflight (OPTIONS carrying `Access-Control-Request-Method`) executes the security pipeline first and is then short-circuited with `200 OK` or `400 Disallowed CORS: origin, method, headers` (the verdict headers are attached before the failure decision, so the 400 still carries allow-methods/max-age/credentials), and every blocked response the engine returns composes the CORS verdict headers on top of the engine's blocked-response set. A disallowed origin on a normal request simply gets no CORS headers (the browser enforces), and no-origin requests are untouched; the fail-secure unresolvable-client response composes the CORS headers like any other blocked response. For pass-through responses the new `GuardEngine::corsResponseHeaders($request)` hands adapters the per-request CORS map (Vary, Allow-Origin echoing the request origin or `*`, Allow-Credentials, Expose-Headers) to merge with their outgoing headers, mirroring `_inject_cors_headers`. With CORS disabled the policy is null and the engine behaves exactly as before. Coverage lives in the new `bin/test_cors.php` honesty runner (67 assertions: allowed/wildcard/disallowed/combined preflights, the allow-headers wildcard echo, credentials, banned-IP preflights and ordinary blocked responses composing the CORS headers, the `corsResponseHeaders` pass-through API, disabled-behavior pins, config normalization, the `or` fallbacks, and `with()` immutability) registered in the Makefile `RUNNERS` list and the CI workflow. Divergence note: the Go engine composes the CORS headers on top of its security-header set; the PHP engine has no engine-side security-header block yet (a documented gap), so blocked responses here carry only the body `Content-Type` plus the CORS headers.
+
+### Verification
+
+- Full suite green on PHP 8.3 (Docker, php:8.3-cli + throwaway redis:7-alpine, no host php/composer), mirroring the CI workflow step for step: `composer install`, the `php -l` sweep (LINT_OK), `composer validate --strict`, and all `bin/` runners including `bin/conformance.php` 184/184 (verdicts unchanged), `bin/test_state.php`, `bin/test_ratelimit.php` 95/95, `bin/test_geo_rate_limits.php` 97/97, `bin/test_pipeline.php` 93/93, `bin/test_m3b.php` 99/99, `bin/test_m4.php` 132/132 (CORS fail-closed pin removed), `bin/test_m3c.php` 93/93, `bin/test_nfkc.php` 142301/142301, `bin/test_binary_noise_gate.php` 80/80, `bin/test_recon_context_gate.php` 141/141, `bin/test_recon_raw_view_scan.php` 77/77, `bin/test_body_form_scan.php` 72/72, `bin/test_json_walk.php` 64/64, `bin/test_exempt_ips.php` 52/52, `bin/test_excluded_headers.php` 50/50, `bin/test_large_body.php` 24/24, and the new `bin/test_cors.php` 67/67.
+
 v4.1.0 (2026-09-26)
 -------------------
 

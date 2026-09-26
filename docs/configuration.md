@@ -3,8 +3,29 @@
 `SecurityConfig` is built through a single constructor of named arguments
 (every field nullable with an engine default). Arguments belonging to features
 this port does not implement, when set to an enabling value, throw
-`UnsupportedFeatureError` (fail closed): geo country blocking, CORS, guard
+`UnsupportedFeatureError` (fail closed): geo country blocking, guard
 agent telemetry, and dynamic rules.
+
+## CORS
+
+| Argument | Default | Notes |
+|---|---|---|
+| `enableCors` | `false` | Enables the CORS handler over the engine |
+| `corsAllowOrigins` | `['*']` | Exact origins; `*` allows every origin |
+| `corsAllowMethods` | `GET, POST, PUT, PATCH, DELETE, OPTIONS` | Uppercased at config time; an empty list falls back to `GET` |
+| `corsAllowHeaders` | `['*']` | Lowercased at config time; `*` echoes the requested headers verbatim |
+| `corsAllowCredentials` | `false` | Incompatible with the `*` origin: that combination fails config construction |
+| `corsExposeHeaders` | `[]` | Joined into `Access-Control-Expose-Headers` on responses |
+| `corsMaxAge` | `600` | A configured `0` falls back to `600` |
+
+Behavior mirrors the reference `CorsHandler` (guard-core
+`handlers/cors_handler.py`) and the adapter dispatch: a preflight (OPTIONS
+carrying `Access-Control-Request-Method`) executes the security pipeline and
+is then short-circuited with `200 OK` (or `400 Disallowed CORS: origin,
+method, headers`), blocked responses compose the CORS headers on top of the
+engine's blocked-response set, and disallowed origins simply get no CORS
+headers (the browser enforces). For pass-through responses the adapter merges
+`GuardEngine::corsResponseHeaders($request)` with its own outgoing headers.
 
 ## Client identity and proxy trust
 

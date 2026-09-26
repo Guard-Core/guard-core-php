@@ -144,6 +144,24 @@ final class SecurityConfig
     /** @var (\Closure(object, string): mixed)|null */
     public readonly ?\Closure $authVerifier;
 
+    public readonly bool $enableCors;
+
+    /** @var list<string> */
+    public readonly array $corsAllowOrigins;
+
+    /** @var list<string> */
+    public readonly array $corsAllowMethods;
+
+    /** @var list<string> */
+    public readonly array $corsAllowHeaders;
+
+    public readonly bool $corsAllowCredentials;
+
+    /** @var list<string> */
+    public readonly array $corsExposeHeaders;
+
+    public readonly int $corsMaxAge;
+
     public readonly ?string $logSuspiciousLevel;
 
     public readonly ?string $logRequestLevel;
@@ -175,6 +193,10 @@ final class SecurityConfig
      * @param list<string> $emergencyWhitelist
      * @param array<int, string> $customErrorResponses per-status-code body overrides
      * @param list<string> $blockedUserAgents regex patterns, subject truncated to 512 chars
+     * @param list<string> $corsAllowOrigins exact origins; '*' allows every origin (incompatible with $corsAllowCredentials, fail-closed)
+     * @param list<string> $corsAllowMethods uppercased at construction; an empty list falls back to ['GET'] at policy build
+     * @param list<string> $corsAllowHeaders lowercased at construction; '*' echoes the requested headers verbatim
+     * @param list<string> $corsExposeHeaders joined into Access-Control-Expose-Headers on responses
      * @param list<string> $blockedCountries unsupported when non-empty
      * @param list<string> $whitelistCountries unsupported when non-empty
      * @param list<string> $blockCloudProviders selectors "Provider" or "Provider:!region", unknown provider names rejected
@@ -225,6 +247,12 @@ final class SecurityConfig
         ?array $customErrorResponses = null,
         ?array $blockedUserAgents = null,
         ?bool $enableCors = null,
+        ?array $corsAllowOrigins = null,
+        ?array $corsAllowMethods = null,
+        ?array $corsAllowHeaders = null,
+        ?bool $corsAllowCredentials = null,
+        ?array $corsExposeHeaders = null,
+        ?int $corsMaxAge = null,
         ?bool $enableAgent = null,
         ?bool $enableDynamicRules = null,
         ?\Closure $customRequestCheck = null,
@@ -296,11 +324,42 @@ final class SecurityConfig
         $this->logSuspiciousLevel = $this->validateLogLevel($logSuspiciousLevel, 'log_suspicious_level', 'WARNING');
         $this->logRequestLevel = $this->validateLogLevel($logRequestLevel, 'log_request_level', null);
 
+        $this->enableCors = $enableCors ?? false;
+        // CORS surface, mirrored from the reference cors_* SecurityConfig
+        // fields (_security_config_fields.py): default origins/headers are
+        // the wildcard, default methods cover the six common verbs, default
+        // max_age is 600. Construction uppercases the methods and
+        // lowercases the header names (CorsHandler._init_enabled) and
+        // rejects the wildcard + credentials misconfiguration fail-closed
+        // (the reference raises at handler construction; raising here only
+        // moves the failure earlier).
+        $this->corsAllowOrigins = $this->validateStringList($corsAllowOrigins ?? ['*'], 'cors_allow_origins');
+        $this->corsAllowMethods = array_map(
+            'strtoupper',
+            $this->validateStringList(
+                $corsAllowMethods ?? ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
+                'cors_allow_methods'
+            )
+        );
+        $this->corsAllowHeaders = array_map(
+            'strtolower',
+            $this->validateStringList($corsAllowHeaders ?? ['*'], 'cors_allow_headers')
+        );
+        $this->corsAllowCredentials = $corsAllowCredentials ?? false;
+        $this->corsExposeHeaders = $this->validateStringList($corsExposeHeaders ?? [], 'cors_expose_headers');
+        $this->corsMaxAge = $corsMaxAge ?? 600;
+        if (
+            $this->enableCors
+            && $this->corsAllowCredentials
+            && in_array('*', $this->corsAllowOrigins, true)
+        ) {
+            throw new \InvalidArgumentException(
+                "CORS misconfiguration: wildcard origin '*' is incompatible with cors_allow_credentials=True"
+            );
+        }
+
         if ($blockedCountries !== [] || $whitelistCountries !== []) {
             throw new UnsupportedFeatureError('geo country blocking');
-        }
-        if ($enableCors === true) {
-            throw new UnsupportedFeatureError('CORS');
         }
         if ($enableAgent === true) {
             throw new UnsupportedFeatureError('guard agent telemetry');
@@ -309,6 +368,19 @@ final class SecurityConfig
             throw new UnsupportedFeatureError('dynamic rules');
         }
         $this->customRequestCheck = $customRequestCheck;
+    }
+
+    /** @param list<mixed> $entries @return list<string> */
+    private function validateStringList(array $entries, string $field): array
+    {
+        foreach ($entries as $entry) {
+            if (!is_string($entry)) {
+                $shown = get_debug_type($entry);
+                throw new \InvalidArgumentException("{$field}: entries must be strings, got {$shown}");
+            }
+        }
+
+        return $entries;
     }
 
     private function validateLogLevel(?string $level, string $field, ?string $default): ?string
@@ -454,6 +526,13 @@ final class SecurityConfig
             'emergencyMode' => $this->emergencyMode,
             'enforceHttps' => $this->enforceHttps,
             'blockedUserAgents' => $this->blockedUserAgents,
+            'enableCors' => $this->enableCors,
+            'corsAllowOrigins' => $this->corsAllowOrigins,
+            'corsAllowMethods' => $this->corsAllowMethods,
+            'corsAllowHeaders' => $this->corsAllowHeaders,
+            'corsAllowCredentials' => $this->corsAllowCredentials,
+            'corsExposeHeaders' => $this->corsExposeHeaders,
+            'corsMaxAge' => $this->corsMaxAge,
             'blockCloudProviders' => $this->blockCloudProviders,
             'cloudIpRefreshInterval' => $this->cloudIpRefreshInterval,
             'authVerifier' => $this->authVerifier,

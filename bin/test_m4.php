@@ -217,7 +217,6 @@ $t->throws(\InvalidArgumentException::class, fn () => new SecurityConfig(blockCl
 $t->throws(\InvalidArgumentException::class, fn () => new SecurityConfig(blockCloudProviders: ['Foo:!region']), 'carve-out on unknown provider rejected');
 $t->throws(UnsupportedFeatureError::class, fn () => new SecurityConfig(blockedCountries: ['CN']), 'geo country blocking still fail-closed');
 $t->throws(UnsupportedFeatureError::class, fn () => new SecurityConfig(enableDynamicRules: true), 'dynamic rules still fail-closed');
-$t->throws(UnsupportedFeatureError::class, fn () => new SecurityConfig(enableCors: true), 'CORS still fail-closed');
 $t->same(true, (new SecurityConfig(blockCloudProviders: ['AWS']))->cloudBlockingEnabled(), 'cloudBlockingEnabled true with providers');
 $t->same(false, (new SecurityConfig())->cloudBlockingEnabled(), 'cloudBlockingEnabled false without providers');
 
