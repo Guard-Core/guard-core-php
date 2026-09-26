@@ -19,6 +19,7 @@ use RenzoFranceschini\GuardCore\Request\GuardResponse;
 use RenzoFranceschini\GuardCore\Request\GuardResponseFactory;
 use RenzoFranceschini\GuardCore\Redis\RedisHandler;
 use RenzoFranceschini\GuardCore\Routing\RouteResolver;
+use RenzoFranceschini\GuardCore\SecurityHeaders\SecurityHeadersPolicy;
 
 final class GuardEngine
 {
@@ -142,7 +143,32 @@ final class GuardEngine
 
     public function failClosedResponse(): GuardResponse
     {
-        return $this->createErrorResponse(500, 'Security check failed');
+        $response = $this->createErrorResponse(500, 'Security check failed');
+        $this->applySecurityHeaders($response);
+
+        return $response;
+    }
+
+    /**
+     * Computes the security headers an adapter must put on a normal
+     * (pass-through) response, mirroring the reference response factory
+     * applying security_headers_manager.get_headers on the way out
+     * (guard_core/core/responses/factory.py process_response). Blocked
+     * responses returned from execute() already carry the headers. An
+     * empty map means the feature is disabled.
+     *
+     * @return array<string, string>
+     */
+    public function responseHeaders(): array
+    {
+        return $this->config->securityHeaders->responseHeaders();
+    }
+
+    private function applySecurityHeaders(GuardResponse $response): void
+    {
+        foreach ($this->responseHeaders() as $name => $value) {
+            $response->headers()->set($name, $value);
+        }
     }
 
     public function initialize(): void
@@ -185,6 +211,7 @@ final class GuardEngine
             $state->clientIp = $clientIp;
             if ($clientIp === ClientIpResolver::UNKNOWN_CLIENT_IDENTITY && $this->config->failSecure) {
                 $response = $this->unresolvableClientResponse($request);
+                $this->applySecurityHeaders($response);
                 $cors?->injectResponseHeaders($response, $request->headers());
 
                 return $response;
@@ -194,15 +221,25 @@ final class GuardEngine
         $response = $this->pipeline->execute($request);
 
         if ($cors === null) {
+            if ($response !== null) {
+                $this->applySecurityHeaders($response);
+            }
+
             return $response;
         }
         if ($response !== null) {
+            $this->applySecurityHeaders($response);
             $cors->injectResponseHeaders($response, $request->headers());
 
             return $response;
         }
 
-        return $preflight ? $cors->buildPreflightResponse($request, $this->responseFactory) : null;
+        $preflightResponse = $preflight ? $cors->buildPreflightResponse($request, $this->responseFactory) : null;
+        if ($preflightResponse !== null) {
+            $this->applySecurityHeaders($preflightResponse);
+        }
+
+        return $preflightResponse;
     }
 
     /**

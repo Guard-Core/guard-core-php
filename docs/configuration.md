@@ -27,6 +27,26 @@ engine's blocked-response set, and disallowed origins simply get no CORS
 headers (the browser enforces). For pass-through responses the adapter merges
 `GuardEngine::corsResponseHeaders($request)` with its own outgoing headers.
 
+## Security headers
+
+| Argument | Default | Notes |
+|---|---|---|
+| `securityHeaders` | reference default block | Reference-shaped dict: `enabled`, `hsts` (`max_age`/`include_subdomains`/`preload`), `csp` (ordered directive => sources), `frame_options`, `content_type_options`, `xss_protection`, `referrer_policy`, `permissions_policy`, `custom` |
+
+Behavior mirrors the reference `SecurityHeadersManager`
+(guard-core `handlers/security_headers_handler.py`): disabled configuration
+emits no headers, the class defaults apply, an absent or `null` override key
+keeps the class default, an empty `permissions_policy` removes that header
+(the reference falsy check), an ordered `csp` block joins directives into
+`Content-Security-Policy`, the `hsts` block builds
+`max-age`/`includeSubDomains`/`preload` with the preload corrections
+(preload requires at least one year and subdomains), and `custom` headers
+land last and may override anything. Validation is fail-closed at config
+construction (the reference `configure()` raising): RFC 7230 token names for
+custom headers, CRLF rejected, values capped at 8192 bytes, control
+characters sanitized away. Blocked responses carry the headers engine-side;
+pass-through responses take `GuardEngine::responseHeaders()`.
+
 ## Geo country rules
 
 | Argument | Default | Notes |
