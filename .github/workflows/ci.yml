@@ -108,6 +108,9 @@ jobs:
       - name: test_excluded_headers
         run: php bin/test_excluded_headers.php
 
+      - name: test_cors
+        run: php bin/test_cors.php
+
       - name: test_large_body
         run: php bin/test_large_body.php
 

@@ -60,6 +60,28 @@ $request->state()->routeConfig = new RouteConfig(
 
 A request from a resolved country enforces that country's tier first (`'*'` when the country is missing from the map, nothing when neither matches), the tier shares the route's hashed bucket, and exempt and whitelisted clients still skip the check entirely. Geo country blocking (`blocked_countries`/`whitelist_countries`) remains unsupported.
 
+## CORS
+
+Set `enableCors: true` and the engine runs the reference `CorsHandler` behavior: a preflight (OPTIONS carrying `Access-Control-Request-Method`) executes the security pipeline and is short-circuited with `200 OK` or `400 Disallowed CORS: origin, method, headers`, every blocked response carries the CORS verdict headers, and a disallowed origin on a normal request simply gets no CORS headers (the browser enforces). The wildcard-origin plus `corsAllowCredentials` combination fails config construction.
+
+```php
+$config = new SecurityConfig(
+    enableRedis: false,
+    enableCors: true,
+    corsAllowOrigins: ['https://app.example.com'],
+    corsAllowMethods: ['GET', 'POST'],
+);
+$engine = new GuardEngine($config);
+```
+
+For pass-through (non-blocked) responses, adapters merge the per-request CORS map into their outgoing headers:
+
+```php
+foreach ($engine->corsResponseHeaders($request) as $name => $value) {
+    $response = $response->withHeader($name, $value);
+}
+```
+
 ## Detection limits
 
 
