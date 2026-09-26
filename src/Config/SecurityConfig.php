@@ -4,6 +4,8 @@ declare(strict_types=1);
 
 namespace RenzoFranceschini\GuardCore\Config;
 
+use RenzoFranceschini\GuardCore\Behavior\BehaviorRule;
+use RenzoFranceschini\GuardCore\Behavior\BehaviorRuleValidation;
 use RenzoFranceschini\GuardCore\Cloud\CloudProviderRegistry;
 use RenzoFranceschini\GuardCore\GeoIp\CountryResolver;
 use RenzoFranceschini\GuardCore\GeoIp\GeoIpManager;
@@ -136,6 +138,13 @@ final class SecurityConfig
 
     public readonly bool $enforceHttps;
 
+    /** @var list<BehaviorRule> */
+    public readonly array $globalBehaviorRules;
+
+    public readonly bool $behaviorScanResponseBody;
+
+    public readonly int $behaviorMaxResponseBodyInspectBytes;
+
     public readonly SecurityHeadersPolicy $securityHeaders;
 
     /** @var list<string> */
@@ -267,6 +276,9 @@ final class SecurityConfig
         ?bool $emergencyMode = null,
         ?array $emergencyWhitelist = null,
         ?bool $enforceHttps = null,
+        array $globalBehaviorRules = [],
+        ?bool $behaviorScanResponseBody = null,
+        ?int $behaviorMaxResponseBodyInspectBytes = null,
         SecurityHeadersPolicy|array|null $securityHeaders = null,
         ?array $customErrorResponses = null,
         ?array $blockedUserAgents = null,
@@ -338,6 +350,44 @@ final class SecurityConfig
         $this->emergencyWhitelist = $this->validateIpCidrList($emergencyWhitelist ?? [], 'emergency_whitelist');
         $this->emergencyMode = $emergencyMode ?? false;
         $this->enforceHttps = $enforceHttps ?? false;
+        // Behavior-rules surface, mirrored from the reference
+        // _security_config_fields.py and its validators
+        // (_security_config_field_validators.py): globalBehaviorRules
+        // applies to every route in addition to any route-specific rules
+        // (RouteConfig behavior_rules); behaviorScanResponseBody gates
+        // reading response bodies for return_pattern rules whose pattern is
+        // not a status: pattern (default off: zero behavior change unless
+        // enabled, and construction rejects such rules while it is off,
+        // mirroring the fail-closed _validate_return_pattern_requires_scan);
+        // the inspect-bytes cap bounds how much of the leading response
+        // body is held for pattern inspection (default 262144, reference
+        // ge/le bounds 1024..10485760, a configured 0 normalizes to the
+        // default).
+        $behaviorRules = [];
+        foreach ($globalBehaviorRules as $i => $rule) {
+            try {
+                $behaviorRules[] = $rule instanceof BehaviorRule ? $rule : BehaviorRule::fromArray($rule);
+            } catch (\InvalidArgumentException $e) {
+                throw new \InvalidArgumentException("global_behavior_rules[{$i}]: {$e->getMessage()}");
+            }
+        }
+        $this->globalBehaviorRules = $behaviorRules;
+        $this->behaviorScanResponseBody = $behaviorScanResponseBody ?? false;
+        $maxInspectBytes = $behaviorMaxResponseBodyInspectBytes ?? 262144;
+        if ($maxInspectBytes === 0) {
+            $maxInspectBytes = 262144;
+        }
+        if ($maxInspectBytes < 1024 || $maxInspectBytes > 10485760) {
+            throw new \InvalidArgumentException(
+                "behavior_max_response_body_inspect_bytes: must be between 1024 and 10485760, got {$maxInspectBytes}"
+            );
+        }
+        $this->behaviorMaxResponseBodyInspectBytes = $maxInspectBytes;
+        BehaviorRuleValidation::validateRulesAgainstScanFlag(
+            $this->globalBehaviorRules,
+            $this->behaviorScanResponseBody,
+            'global_behavior_rules'
+        );
         // Security headers surface, mirrored from the reference
         // security_headers dict field (_security_config_fields.py) and its
         // SecurityHeadersManager resolution. A policy instance passes
@@ -614,6 +664,9 @@ final class SecurityConfig
             'emergencyWhitelist' => $this->emergencyWhitelist,
             'emergencyMode' => $this->emergencyMode,
             'enforceHttps' => $this->enforceHttps,
+            'globalBehaviorRules' => $this->globalBehaviorRules,
+            'behaviorScanResponseBody' => $this->behaviorScanResponseBody,
+            'behaviorMaxResponseBodyInspectBytes' => $this->behaviorMaxResponseBodyInspectBytes,
             'securityHeaders' => $this->securityHeaders,
             'blockedUserAgents' => $this->blockedUserAgents,
             'enableCors' => $this->enableCors,

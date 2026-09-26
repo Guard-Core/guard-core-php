@@ -117,6 +117,11 @@ jobs:
       - name: test_security_headers
         run: php bin/test_security_headers.php
 
+      - name: test_behavior
+        env:
+          REDIS_HOST: 127.0.0.1
+        run: php bin/test_behavior.php
+
       - name: test_large_body
         run: php bin/test_large_body.php
 

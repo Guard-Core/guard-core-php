@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace RenzoFranceschini\GuardCore\Pipeline;
 
 use RenzoFranceschini\GuardCore\Ban\IpBanManager;
+use RenzoFranceschini\GuardCore\Behavior\SuspiciousCountStore;
 use RenzoFranceschini\GuardCore\Cloud\CloudManager;
 use RenzoFranceschini\GuardCore\Config\SecurityConfig;
 use RenzoFranceschini\GuardCore\Detection\SusPatterns;
@@ -61,7 +62,8 @@ final class CheckFactory
         private readonly ?RateLimitHandler $rateLimitHandler = null,
         ?SusPatterns $susPatterns = null,
         ?CloudManager $cloudManager = null,
-        ?CountryResolver $geoIpHandler = null
+        ?CountryResolver $geoIpHandler = null,
+        private readonly ?SuspiciousCountStore $suspiciousCountStore = null
     ) {
         $this->susPatterns = $susPatterns;
         $this->cloudManager = $cloudManager ?? new CloudManager();
@@ -125,7 +127,8 @@ final class CheckFactory
                 $this->responseFactory,
                 $this->susPatterns ?? new SusPatterns($config->detectionSemanticThreshold),
                 $this->ipBanManager,
-                $this->routeResolver
+                $this->routeResolver,
+                $this->suspiciousCountStore
             ),
             'custom_request' => new CustomRequestCheck($config, $this->responseFactory),
             default => new DeferredCheck($name, $config, $this->responseFactory),

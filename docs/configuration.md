@@ -47,6 +47,24 @@ custom headers, CRLF rejected, values capped at 8192 bytes, control
 characters sanitized away. Blocked responses carry the headers engine-side;
 pass-through responses take `GuardEngine::responseHeaders()`.
 
+## Behavior rules
+
+| Argument | Default | Notes |
+|---|---|---|
+| `globalBehaviorRules` | `[]` | Reference-shaped rule dicts (`rule_type`, `threshold`, `window` (default 3600), `pattern`, `action` (default `log`), `ban_duration`, `correlate_with_detection`) applied to every route |
+| `behaviorScanResponseBody` | `false` | Gates reading response bodies for non-`status:` return_pattern rules; construction rejects such rules while it is off (fail closed) |
+| `behaviorMaxResponseBodyInspectBytes` | `262144` | Leading response-body prefix held for return_pattern inspection; bounds 1024..10485760, `0` normalizes to the default |
+
+Route-level rules ride `new RouteConfig(behaviorRules: [...])`. Usage and
+frequency rules run on requests the pipeline allowed; return_pattern rules
+run when the adapter calls `GuardEngine::processResponse($request,
+$response)`. Windows are strictly-greater than the threshold, backed by
+Redis over the reference key layout (`behavior_usage`/`behavior_returns`
+with SHA-256 identity segments) and by bounded local maps otherwise.
+Passive mode only logs; active `ban` uses the rule's `ban_duration` or the
+3600s fallback. `correlate_with_detection` halves the effective threshold
+of a global return rule while the IP has prior detection-category hits.
+
 ## Geo country rules
 
 | Argument | Default | Notes |

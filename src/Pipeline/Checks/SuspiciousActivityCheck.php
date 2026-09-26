@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace RenzoFranceschini\GuardCore\Pipeline\Checks;
 
 use RenzoFranceschini\GuardCore\Ban\IpBanManager;
+use RenzoFranceschini\GuardCore\Behavior\SuspiciousCountStore;
 use RenzoFranceschini\GuardCore\Config\SecurityConfig;
 use RenzoFranceschini\GuardCore\Detection\BodyFormScan;
 use RenzoFranceschini\GuardCore\Detection\HeaderExclusions;
@@ -23,14 +24,23 @@ final class SuspiciousActivityCheck extends SecurityCheck
     /** @var array<string, int> */
     private array $suspiciousCounts = [];
 
+    /**
+     * The shared per-category store (the engine owns it so the behavioral
+     * processor's correlate_with_detection reads the same counts, mirroring
+     * the reference reading middleware.suspicious_request_counts).
+     */
+    private readonly SuspiciousCountStore $suspiciousCountStore;
+
     public function __construct(
         SecurityConfig $config,
         GuardResponseFactory $responseFactory,
         private readonly SusPatterns $susPatterns,
         private readonly ?IpBanManager $ipBanManager,
-        private readonly RouteResolver $routeResolver
+        private readonly RouteResolver $routeResolver,
+        ?SuspiciousCountStore $suspiciousCountStore = null
     ) {
         parent::__construct($config, $responseFactory);
+        $this->suspiciousCountStore = $suspiciousCountStore ?? new SuspiciousCountStore();
     }
 
     public function checkName(): string
@@ -88,6 +98,9 @@ final class SuspiciousActivityCheck extends SecurityCheck
 
         $triggerInfo = 'threat categories: ' . implode(',', $categories);
         $this->stashBlock($request, 'Penetration patterns detected', $triggerInfo);
+        foreach ($categories as $category) {
+            $this->suspiciousCountStore->record($clientIp, $category);
+        }
 
         if ($this->isPassiveMode()) {
             return null;

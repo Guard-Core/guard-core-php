@@ -5,6 +5,9 @@ declare(strict_types=1);
 namespace RenzoFranceschini\GuardCore\Engine;
 
 use RenzoFranceschini\GuardCore\Ban\IpBanManager;
+use RenzoFranceschini\GuardCore\Behavior\BehaviorTracker;
+use RenzoFranceschini\GuardCore\Behavior\BehavioralProcessor;
+use RenzoFranceschini\GuardCore\Behavior\SuspiciousCountStore;
 use RenzoFranceschini\GuardCore\Cloud\CloudManager;
 use RenzoFranceschini\GuardCore\Config\SecurityConfig;
 use RenzoFranceschini\GuardCore\Cors\CorsPolicy;
@@ -37,6 +40,10 @@ final class GuardEngine
 
     private readonly ?CorsPolicy $corsPolicy;
 
+    private readonly SuspiciousCountStore $suspiciousCountStore;
+
+    private readonly ?BehavioralProcessor $behavioralProcessor;
+
     private readonly GuardResponseFactory $responseFactory;
 
     private readonly SecurityCheckPipeline $pipeline;
@@ -64,6 +71,9 @@ final class GuardEngine
         $this->rateLimitHandler = new RateLimitHandler(self::rateLimitConfig($config), warn: $warn);
         $this->cloudManager = $cloudManager ?? ($config->cloudBlockingEnabled() ? new CloudManager() : null);
         $this->corsPolicy = CorsPolicy::forConfig($config);
+        $this->suspiciousCountStore = new SuspiciousCountStore();
+        $tracker = new BehaviorTracker($config, $this->redis, $this->banManager, $log);
+        $this->behavioralProcessor = new BehavioralProcessor($config, $tracker, $this->suspiciousCountStore, $log);
         $checkFactory = new CheckFactory(
             $this->responseFactory,
             new RouteResolver(),
@@ -71,7 +81,8 @@ final class GuardEngine
             $this->rateLimitHandler,
             null,
             $this->cloudManager,
-            $config->geoIpHandler
+            $config->geoIpHandler,
+            $this->suspiciousCountStore
         );
         $this->pipeline = new SecurityCheckPipeline(
             $checkFactory->buildChecks($config),
@@ -141,12 +152,37 @@ final class GuardEngine
         return $this->pipeline;
     }
 
+    public function behaviorProcessor(): ?BehavioralProcessor
+    {
+        return $this->behavioralProcessor;
+    }
+
     public function failClosedResponse(): GuardResponse
     {
         $response = $this->createErrorResponse(500, 'Security check failed');
         $this->applySecurityHeaders($response);
 
         return $response;
+    }
+
+    /**
+     * Runs the response-side behavior rules for an adapter's outgoing
+     * (pass-through) response, mirroring the reference response factory's
+     * behavioral phase (guard_core/core/responses/factory.py
+     * process_response): the route's return_pattern rules run first, then
+     * the global ones. Return rules never modify the response; a matched
+     * rule dispatches its configured action (ban/log/throttle/alert). The
+     * adapter calls this on every pass-through response it sends.
+     */
+    public function processResponse(GuardRequest $request, ?GuardResponse $response): void
+    {
+        if ($this->behavioralProcessor === null) {
+            return;
+        }
+        $now = microtime(true);
+        $clientIp = $request->state()->clientIp ?? '';
+        $this->behavioralProcessor->processReturnRules($request, $response, $clientIp, $request->state()->routeConfig, $now);
+        $this->behavioralProcessor->processGlobalReturnRules($request, $response, $clientIp, $now);
     }
 
     /**
@@ -219,6 +255,18 @@ final class GuardEngine
         }
 
         $response = $this->pipeline->execute($request);
+
+        if ($response === null) {
+            // The request passed the pipeline: usage/frequency behavior
+            // rules track it (the reference runs process_usage_rules from
+            // the adapter middleware on requests the checks did not block).
+            $this->behavioralProcessor?->processUsageRules(
+                $request,
+                $state->clientIp ?? '',
+                $state->routeConfig,
+                microtime(true)
+            );
+        }
 
         if ($cors === null) {
             if ($response !== null) {
