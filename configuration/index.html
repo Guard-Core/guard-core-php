@@ -377,6 +377,23 @@
     </span>
   </a>
   
+    <nav class="md-nav" aria-label="Security headers">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#per-route-detection-exclusions" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Per-route detection exclusions
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
 </li>
       
         <li class="md-nav__item">
@@ -553,6 +570,23 @@
       
     </span>
   </a>
+  
+    <nav class="md-nav" aria-label="Security headers">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#per-route-detection-exclusions" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Per-route detection exclusions
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
   
 </li>
       
@@ -788,6 +822,20 @@ construction (the reference <code>configure()</code> raising): RFC 7230 token na
 custom headers, CRLF rejected, values capped at 8192 bytes, control
 characters sanitized away. Blocked responses carry the headers engine-side;
 pass-through responses take <code>GuardEngine::responseHeaders()</code>.</p>
+<h3 id="per-route-detection-exclusions">Per-route detection exclusions</h3>
+<p><code>RouteConfig</code> mirrors the reference detection-exclusion fields:
+<code>enableSuspiciousDetection</code> (default true; wins over the global
+<code>enablePenetrationDetection</code> for routed requests), <code>excludedDetectionParams</code>,
+<code>excludedDetectionBodyFields</code>, <code>excludedDetectionHeaders</code>,
+<code>enabledDetectionCategories</code> and <code>detectionScanBody</code>. A null field inherits
+the global config; a non-null set replaces the global one, except the header
+set which always merges the hardcoded proxy-identity defaults with the
+global set and the route set (suppressing ssrf address-chain false positives
+only). A false <code>detectionScanBody</code> skips the request-body surface while the
+URL path, query and headers still scan. Scheduling note: the engine's
+statically-built pipeline schedules the check from the global flag; the
+route-aware scheduling gate lives at the <code>CheckFactory</code> level (see
+KNOWN_GAPS).</p>
 <h2 id="behavior-rules">Behavior rules</h2>
 <table>
 <thead>
