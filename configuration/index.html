@@ -369,6 +369,17 @@
 </li>
       
         <li class="md-nav__item">
+  <a href="#security-headers" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Security headers
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
   <a href="#geo-country-rules" class="md-nav__link">
     <span class="md-ellipsis">
       
@@ -517,6 +528,17 @@
     <span class="md-ellipsis">
       
         CORS
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#security-headers" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Security headers
       
     </span>
   </a>
@@ -714,6 +736,36 @@ method, headers</code>), blocked responses compose the CORS headers on top of th
 engine's blocked-response set, and disallowed origins simply get no CORS
 headers (the browser enforces). For pass-through responses the adapter merges
 <code>GuardEngine::corsResponseHeaders($request)</code> with its own outgoing headers.</p>
+<h2 id="security-headers">Security headers</h2>
+<table>
+<thead>
+<tr>
+<th>Argument</th>
+<th>Default</th>
+<th>Notes</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>securityHeaders</code></td>
+<td>reference default block</td>
+<td>Reference-shaped dict: <code>enabled</code>, <code>hsts</code> (<code>max_age</code>/<code>include_subdomains</code>/<code>preload</code>), <code>csp</code> (ordered directive =&gt; sources), <code>frame_options</code>, <code>content_type_options</code>, <code>xss_protection</code>, <code>referrer_policy</code>, <code>permissions_policy</code>, <code>custom</code></td>
+</tr>
+</tbody>
+</table>
+<p>Behavior mirrors the reference <code>SecurityHeadersManager</code>
+(guard-core <code>handlers/security_headers_handler.py</code>): disabled configuration
+emits no headers, the class defaults apply, an absent or <code>null</code> override key
+keeps the class default, an empty <code>permissions_policy</code> removes that header
+(the reference falsy check), an ordered <code>csp</code> block joins directives into
+<code>Content-Security-Policy</code>, the <code>hsts</code> block builds
+<code>max-age</code>/<code>includeSubDomains</code>/<code>preload</code> with the preload corrections
+(preload requires at least one year and subdomains), and <code>custom</code> headers
+land last and may override anything. Validation is fail-closed at config
+construction (the reference <code>configure()</code> raising): RFC 7230 token names for
+custom headers, CRLF rejected, values capped at 8192 bytes, control
+characters sanitized away. Blocked responses carry the headers engine-side;
+pass-through responses take <code>GuardEngine::responseHeaders()</code>.</p>
 <h2 id="geo-country-rules">Geo country rules</h2>
 <table>
 <thead>
