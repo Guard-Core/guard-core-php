@@ -145,6 +145,14 @@ final class SecurityConfig
 
     public readonly int $behaviorMaxResponseBodyInspectBytes;
 
+    /**
+     * Mirrors the reference detection_scan_body field (default true): a
+     * false skips the request-body surface entirely for penetration
+     * detection while the URL path, query and headers still scan. A route's
+     * detectionScanBody overrides this per route.
+     */
+    public readonly bool $detectionScanBody;
+
     public readonly SecurityHeadersPolicy $securityHeaders;
 
     /** @var list<string> */
@@ -279,6 +287,7 @@ final class SecurityConfig
         array $globalBehaviorRules = [],
         ?bool $behaviorScanResponseBody = null,
         ?int $behaviorMaxResponseBodyInspectBytes = null,
+        ?bool $detectionScanBody = null,
         SecurityHeadersPolicy|array|null $securityHeaders = null,
         ?array $customErrorResponses = null,
         ?array $blockedUserAgents = null,
@@ -383,6 +392,7 @@ final class SecurityConfig
             );
         }
         $this->behaviorMaxResponseBodyInspectBytes = $maxInspectBytes;
+        $this->detectionScanBody = $detectionScanBody ?? true;
         BehaviorRuleValidation::validateRulesAgainstScanFlag(
             $this->globalBehaviorRules,
             $this->behaviorScanResponseBody,
@@ -667,6 +677,7 @@ final class SecurityConfig
             'globalBehaviorRules' => $this->globalBehaviorRules,
             'behaviorScanResponseBody' => $this->behaviorScanResponseBody,
             'behaviorMaxResponseBodyInspectBytes' => $this->behaviorMaxResponseBodyInspectBytes,
+            'detectionScanBody' => $this->detectionScanBody,
             'securityHeaders' => $this->securityHeaders,
             'blockedUserAgents' => $this->blockedUserAgents,
             'enableCors' => $this->enableCors,

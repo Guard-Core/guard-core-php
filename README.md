@@ -169,6 +169,20 @@ $engine->execute($request); // tracks routeConfig->behaviorRules usage/frequency
 $engine->processResponse($request, $response);
 ```
 
+### Per-route detection exclusions
+
+`RouteConfig` carries the reference detection-exclusion surface: `enableSuspiciousDetection` (route-level kill switch or opt-in, winning over the global flag), `excludedDetectionParams`, `excludedDetectionBodyFields` and `enabledDetectionCategories` (a non-null route set replaces the global one, an empty category list disables every category), `excludedDetectionHeaders` (always merged on top of the defaults and the global set, suppressing ssrf address-chain false positives only) and `detectionScanBody` (a false skips the request-body surface only).
+
+```php
+$route = new RouteConfig(
+    enableSuspiciousDetection: true,          // route-level kill switch / opt-in
+    excludedDetectionParams: ['search_hint'], // replaces the global param set
+    enabledDetectionCategories: ['sqli'],     // narrows the category set
+    detectionScanBody: false,                 // skips the body surface only
+);
+$request->state()->routeConfig = $route;
+```
+
 ## Detection limits
 
 
