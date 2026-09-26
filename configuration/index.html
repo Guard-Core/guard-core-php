@@ -380,6 +380,17 @@
 </li>
       
         <li class="md-nav__item">
+  <a href="#behavior-rules" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Behavior rules
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
   <a href="#geo-country-rules" class="md-nav__link">
     <span class="md-ellipsis">
       
@@ -539,6 +550,17 @@
     <span class="md-ellipsis">
       
         Security headers
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#behavior-rules" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Behavior rules
       
     </span>
   </a>
@@ -766,6 +788,42 @@ construction (the reference <code>configure()</code> raising): RFC 7230 token na
 custom headers, CRLF rejected, values capped at 8192 bytes, control
 characters sanitized away. Blocked responses carry the headers engine-side;
 pass-through responses take <code>GuardEngine::responseHeaders()</code>.</p>
+<h2 id="behavior-rules">Behavior rules</h2>
+<table>
+<thead>
+<tr>
+<th>Argument</th>
+<th>Default</th>
+<th>Notes</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>globalBehaviorRules</code></td>
+<td><code>[]</code></td>
+<td>Reference-shaped rule dicts (<code>rule_type</code>, <code>threshold</code>, <code>window</code> (default 3600), <code>pattern</code>, <code>action</code> (default <code>log</code>), <code>ban_duration</code>, <code>correlate_with_detection</code>) applied to every route</td>
+</tr>
+<tr>
+<td><code>behaviorScanResponseBody</code></td>
+<td><code>false</code></td>
+<td>Gates reading response bodies for non-<code>status:</code> return_pattern rules; construction rejects such rules while it is off (fail closed)</td>
+</tr>
+<tr>
+<td><code>behaviorMaxResponseBodyInspectBytes</code></td>
+<td><code>262144</code></td>
+<td>Leading response-body prefix held for return_pattern inspection; bounds 1024..10485760, <code>0</code> normalizes to the default</td>
+</tr>
+</tbody>
+</table>
+<p>Route-level rules ride <code>new RouteConfig(behaviorRules: [...])</code>. Usage and
+frequency rules run on requests the pipeline allowed; return_pattern rules
+run when the adapter calls <code>GuardEngine::processResponse($request,
+$response)</code>. Windows are strictly-greater than the threshold, backed by
+Redis over the reference key layout (<code>behavior_usage</code>/<code>behavior_returns</code>
+with SHA-256 identity segments) and by bounded local maps otherwise.
+Passive mode only logs; active <code>ban</code> uses the rule's <code>ban_duration</code> or the
+3600s fallback. <code>correlate_with_detection</code> halves the effective threshold
+of a global return rule while the IP has prior detection-category hits.</p>
 <h2 id="geo-country-rules">Geo country rules</h2>
 <table>
 <thead>
