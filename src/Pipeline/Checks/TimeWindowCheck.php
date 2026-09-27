@@ -40,10 +40,11 @@ final class TimeWindowCheck extends SecurityCheck
 
         if (!self::isWithinWindow($routeConfig->timeRestrictions)) {
             $reason = 'Access outside allowed time window';
-            $this->stashBlock($request, $reason, $reason);
+            $this->stashBlock($request, $reason, '');
             if (!$this->isPassiveMode()) {
                 return $this->createErrorResponse(403, 'Access not allowed at this time');
             }
+            $this->firePassiveBlockHook($request, $reason, '');
         }
 
         return null;

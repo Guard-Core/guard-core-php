@@ -278,7 +278,7 @@ $t->same(429, $response?->statusCode(), 'route geo hit 3 gets 429 (default limit
 $t->same('Too many requests', $response?->body(), '429 body is the standard rate limit message');
 $t->same(1, count($blocks), 'one on_block event fired');
 $t->same('rate_limit', $blocks[0]['check_name'] ?? null, 'block attributed to the rate_limit check');
-$t->same(true, ($blocks[0]['reason'] ?? '') === 'Rate limit exceeded: 3/60 (geo tier)', 'block reason names the geo tier');
+$t->same(true, ($blocks[0]['reason'] ?? '') === 'Rate limit exceeded for IP: ' . GEO_IP . ' (3 requests in 60s window)', 'block reason is the reference log format for the tripped tier');
 $response = fireRoute($engine, GEO_IP_2, '/eu', $route);
 $t->same(null, $response, 'a different DE client has its own bucket');
 
@@ -297,7 +297,7 @@ foreach ([1, 2, 3] as $hit) {
 }
 $response = fireRoute($engine, GEO_IP, '/eu', $route);
 $t->same(429, $response?->statusCode(), 'unwired crossing still throttles at the default limit');
-$t->same(true, ($blocks[0]['reason'] ?? '') === 'Rate limit exceeded: 4/60 (global tier)', 'unwired block reason names the global tier');
+$t->same(true, ($blocks[0]['reason'] ?? '') === 'Rate limit exceeded for IP: ' . GEO_IP . ' (4 requests in 60s window)', 'unwired block reason is the reference log format for the global tier');
 
 $t->section('pipeline: the same route with a resolver wired blocks at the geo tier');
 $blocks = [];
@@ -311,7 +311,7 @@ $engine = makeEngine([
 $t->same(null, fireRoute($engine, GEO_IP, '/eu', $route), 'wired route hit 1 allowed');
 $response = fireRoute($engine, GEO_IP, '/eu', $route);
 $t->same(429, $response?->statusCode(), 'wired route hit 2 blocked at the geo limit');
-$t->same(true, ($blocks[0]['reason'] ?? '') === 'Rate limit exceeded: 2/60 (geo tier)', 'wired block reason names the geo tier');
+$t->same(true, ($blocks[0]['reason'] ?? '') === 'Rate limit exceeded for IP: ' . GEO_IP . ' (2 requests in 60s window)', 'wired block reason is the reference log format for the geo tier');
 
 $t->section('pipeline: exempt skip still precedes the geo tier');
 $engine = makeEngine(
@@ -356,7 +356,9 @@ $engine = makeEngine([
 $route = new RouteConfig(geoRateLimits: ['DE' => ['limit' => 1, 'window' => 60]]);
 $t->same(null, fireRoute($engine, GEO_IP, '/eu', $route), 'passive geo hit 1 allowed');
 $t->same(null, fireRoute($engine, GEO_IP, '/eu', $route), 'passive geo crossing returns no response');
-$t->same([], $blocks, 'passive mode fires no block event (stash suppressed)');
+$t->same(1, count($blocks), 'passive mode fires the block hook inline once (the reference passive dispatch)');
+$t->same(true, ($blocks[0]['passive_mode'] ?? null) === true, 'passive hook payload flags passive_mode');
+$t->same(true, array_key_exists('status_code', $blocks[0]) && $blocks[0]['status_code'] === null, 'passive hook status_code is null');
 
 $t->section('appliesTo: route geo config schedules the check');
 $config = new SecurityConfig(enableRateLimiting: false);

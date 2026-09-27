@@ -94,6 +94,18 @@ final class RouteConfig
      * @param (\Closure(object, string): mixed)|null $apiKeyVerifier
      * @param list<\Closure> $customValidators
      */
+    /** @var list<string> */
+    public readonly array $ipWhitelist;
+
+    /** @var list<string> */
+    public readonly array $ipBlacklist;
+
+    /** @var list<string> */
+    public readonly array $blockedCountries;
+
+    /** @var list<string> */
+    public readonly array $whitelistCountries;
+
     public function __construct(
         array $bypassedChecks = [],
         array $behaviorRules = [],
@@ -120,7 +132,11 @@ final class RouteConfig
         public readonly ?\Closure $apiKeyVerifier = null,
         public readonly ?string $apiKeyHeader = null,
         public readonly ?string $authorizationHeaderRequired = null,
-        public readonly array $customValidators = []
+        public readonly array $customValidators = [],
+        array $ipWhitelist = [],
+        array $ipBlacklist = [],
+        array $blockedCountries = [],
+        array $whitelistCountries = []
     ) {
         $this->bypassedChecks = array_values(array_filter(
             $bypassedChecks,
@@ -143,6 +159,28 @@ final class RouteConfig
         $this->excludedDetectionBodyFields = self::stringListOrNull($excludedDetectionBodyFields);
         $this->enabledDetectionCategories = self::stringListOrNull($enabledDetectionCategories);
         $this->detectionScanBody = $detectionScanBody;
+        $this->ipWhitelist = self::stringList($ipWhitelist);
+        $this->ipBlacklist = self::stringList($ipBlacklist);
+        $this->blockedCountries = self::stringList($blockedCountries);
+        $this->whitelistCountries = self::stringList($whitelistCountries);
+    }
+
+    /**
+     * Non-string entries are silently dropped (decorator-time leniency,
+     * mirroring the other RouteConfig lists).
+     *
+     * @return list<string>
+     */
+    private static function stringList(array $entries): array
+    {
+        $out = [];
+        foreach ($entries as $entry) {
+            if (is_string($entry)) {
+                $out[] = $entry;
+            }
+        }
+
+        return $out;
     }
 
     /**
@@ -251,6 +289,10 @@ final class RouteConfig
             'apiKeyHeader' => $this->apiKeyHeader,
             'authorizationHeaderRequired' => $this->authorizationHeaderRequired,
             'customValidators' => $this->customValidators,
+            'ipWhitelist' => $this->ipWhitelist,
+            'ipBlacklist' => $this->ipBlacklist,
+            'blockedCountries' => $this->blockedCountries,
+            'whitelistCountries' => $this->whitelistCountries,
         ];
         foreach ($values as $name => $value) {
             if (!array_key_exists($name, $known)) {

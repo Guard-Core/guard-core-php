@@ -138,6 +138,10 @@ function corpusFailures(array $case): array
                 'rate_limit_window' => 'rateLimitWindow',
                 'blocked_user_agents' => 'blockedUserAgents',
                 'bypassed_checks' => 'bypassedChecks',
+                'ip_whitelist' => 'ipWhitelist',
+                'ip_blacklist' => 'ipBlacklist',
+                'blocked_countries' => 'blockedCountries',
+                'whitelist_countries' => 'whitelistCountries',
             ];
             foreach ($routeMap as $jsonKey => $phpKey) {
                 if (array_key_exists($jsonKey, $overrides)) {

@@ -195,12 +195,15 @@ $response = $engine->execute(corsPreflight([
 $t->ok($response !== null && $response->statusCode() === 200, 'credentialed preflight answers 200');
 $t->same('true', corsHeaders($response)['access-control-allow-credentials'] ?? null, 'allow-credentials true');
 $t->same('https://app.example.com', corsHeaders($response)['access-control-allow-origin'] ?? null, 'credentialed preflight echoes the origin, not *');
-$t->throws(
-    static fn (): SecurityConfig => new SecurityConfig(enableCors: true, corsAllowOrigins: ['*'], corsAllowCredentials: true),
-    InvalidArgumentException::class,
-    "wildcard origin '*' is incompatible with cors_allow_credentials=True",
-    'wildcard + credentials fails config construction with the reference message'
-);
+$wildcardCreds = new SecurityConfig(enableCors: true, corsAllowOrigins: ['*'], corsAllowCredentials: true);
+$t->ok(true, 'wildcard + credentials is accepted at config construction (the reference _compute_cors_config downgrade)');
+$policy = \RenzoFranceschini\GuardCore\Cors\CorsPolicy::forConfig($wildcardCreds);
+$t->ok($policy !== null, 'wildcard + credentials resolves a policy');
+$wildcardHeaders = $policy !== null
+    ? $policy->buildResponseHeaders(new \RenzoFranceschini\GuardCore\Request\HeaderBag(['Origin' => 'https://app.example.com']))
+    : [];
+$t->same('*', $wildcardHeaders['Access-Control-Allow-Origin'] ?? null, 'wildcard + credentials answers *');
+$t->same(null, $wildcardHeaders['Access-Control-Allow-Credentials'] ?? null, 'wildcard + credentials answers without the allow-credentials header');
 
 $t->section('preflight: the security pipeline runs first');
 $engine = corsEngine(...$baseConfig);
@@ -232,6 +235,9 @@ $headers = $engine->corsResponseHeaders(new SimpleGuardRequest(headers: ['Origin
 $t->same([
     'Vary' => 'Origin',
     'Access-Control-Allow-Origin' => 'https://app.example.com',
+    'Access-Control-Allow-Methods' => 'GET, POST',
+    'Access-Control-Allow-Headers' => 'content-type, x-request-id',
+    'Access-Control-Max-Age' => '3600',
     'Access-Control-Expose-Headers' => 'X-Request-Id',
 ], $headers, 'allowed origin gets the verdict map with expose headers');
 $t->same([], $engine->corsResponseHeaders(new SimpleGuardRequest(headers: ['Origin' => 'https://evil.example.net'])), 'disallowed origin gets no CORS headers');
@@ -293,11 +299,7 @@ $t->same(true, $copy->enableCors, 'with() sets enable_cors on the copy');
 $t->same(['https://x.example'], $copy->corsAllowOrigins, 'with() sets cors_allow_origins on the copy');
 $t->same(1, $copy->revision(), 'with() bumps revision');
 $t->same(false, $base->enableCors, 'source untouched');
-$t->throws(
-    static fn (): SecurityConfig => $base->with(['enable_cors' => true, 'cors_allow_origins' => ['*'], 'cors_allow_credentials' => true]),
-    InvalidArgumentException::class,
-    "wildcard origin '*'",
-    'with() re-validates the wildcard + credentials misconfiguration'
-);
+$widened = $base->with(['enable_cors' => true, 'cors_allow_origins' => ['*'], 'cors_allow_credentials' => true]);
+$t->same(['*'], $widened->corsAllowOrigins, 'with() accepts the wildcard + credentials combination at construction');
 
 exit($t->done('test_cors'));

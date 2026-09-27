@@ -58,10 +58,11 @@ final class UserAgentCheck extends SecurityCheck
 
         if ($routeMatch || self::matchesAnyPattern($userAgent, $this->config->blockedUserAgents)) {
             $reason = "Blocked user agent: {$userAgent}";
-            $this->stashBlock($request, $reason, $reason);
+            $this->stashBlock($request, $reason, '');
             if (!$this->isPassiveMode()) {
                 return $this->createErrorResponse(403, 'User-Agent not allowed');
             }
+            $this->firePassiveBlockHook($request, $reason, '');
         }
 
         return null;

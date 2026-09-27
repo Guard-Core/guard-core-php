@@ -213,12 +213,12 @@ $t->same(true, blocked($check, "--B0\r\nX-Inject: ' OR 1=1--\r\nContent-Disposit
 $t->section('extraction contexts are exact');
 $entries = BodyFormScan::bodyScanEntries('a=1&b=', FORM_CT, 16);
 $t->same([
-    ['a', 'request_body', null],
-    ['1', 'request_body:form_field', null],
-    ['b', 'request_body', null],
-    ['', 'request_body:form_field', null],
+    ['a', 'request_body', null, "Form field name 'a': "],
+    ['1', 'request_body:form_field', null, "Request body field 'a': "],
+    ['b', 'request_body', null, "Form field name 'b': "],
+    ['', 'request_body:form_field', null, "Request body field 'b': "],
 ], $entries, 'form entries: name pair then value pair per field, blank values kept');
-$t->same([['raw', 'request_body', null]], BodyFormScan::bodyScanEntries('raw', TEXT_CT, 16), 'other content types scan as the one raw body');
+$t->same([['raw', 'request_body', null, '']], BodyFormScan::bodyScanEntries('raw', TEXT_CT, 16), 'other content types scan as the one raw body');
 $islandEntries = BodyFormScan::bodyScanEntries(
     filePartBody('d.bin', str_repeat("\x01", 30) . str_repeat('x', 16) . str_repeat("\x01", 30)),
     MULTIPART_CT,

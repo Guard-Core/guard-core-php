@@ -229,7 +229,7 @@ final class SecurityConfig
      * @param list<string> $whitelistCountries restrictive allowlist: only listed countries pass and an unresolved country is denied; uppercased and deduplicated; requires a geo resolver (fail closed)
      * @param string $geoIpDbPath path to a local MMDB database with top-level `country` records; builds the built-in GeoIpManager when no $geoIpHandler is injected
      * @param CountryResolver|null $geoIpHandler injected country resolver; replaces the built-in MMDB reader
-     * @param list<string> $corsAllowOrigins exact origins; '*' allows every origin (incompatible with $corsAllowCredentials, fail-closed)
+     * @param list<string> $corsAllowOrigins exact origins; '*' allows every origin (accepted together with $corsAllowCredentials; the policy resolution drops the credentials flag, like the reference _compute_cors_config)
      * @param list<string> $corsAllowMethods uppercased at construction; an empty list falls back to ['GET'] at policy build
      * @param list<string> $corsAllowHeaders lowercased at construction; '*' echoes the requested headers verbatim
      * @param list<string> $corsExposeHeaders joined into Access-Control-Expose-Headers on responses
@@ -441,15 +441,12 @@ final class SecurityConfig
         $this->corsAllowCredentials = $corsAllowCredentials ?? false;
         $this->corsExposeHeaders = $this->validateStringList($corsExposeHeaders ?? [], 'cors_expose_headers');
         $this->corsMaxAge = $corsMaxAge ?? 600;
-        if (
-            $this->enableCors
-            && $this->corsAllowCredentials
-            && in_array('*', $this->corsAllowOrigins, true)
-        ) {
-            throw new \InvalidArgumentException(
-                "CORS misconfiguration: wildcard origin '*' is incompatible with cors_allow_credentials=True"
-            );
-        }
+        // The wildcard + credentials combination is NOT rejected here: the
+        // reference pipeline response path (_compute_cors_config,
+        // guard_core/handlers/_security_headers_config.py) accepts the
+        // configuration at construction, logs an error, and drops the
+        // credentials flag so the wildcard policy blocks credentialed CORS
+        // at response time. CorsPolicy applies the same downgrade.
 
         if ($blockedCountries !== [] || $whitelistCountries !== []) {
             // Country rules with no resolver fail construction, mirroring

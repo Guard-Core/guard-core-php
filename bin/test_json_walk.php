@@ -114,32 +114,40 @@ $t->same(null, JsonWalk::parse(''), 'empty does not parse');
 $t->section('walk: insertion order, duplicate keys keep first position and last value');
 $entries = JsonWalk::walkEntries(JsonWalk::parse('{"z": "1", "a": "2", "z": "3"}'), 'request_body');
 $t->same([
-    ['z', 'request_body', null],
-    ['3', 'request_body', null],
-    ['a', 'request_body', null],
-    ['2', 'request_body', null],
+    ['z', 'request_body', null, "JSON key 'z': "],
+    ['3', 'request_body', null, "Request body field 'z': "],
+    ['a', 'request_body', null, "JSON key 'a': "],
+    ['2', 'request_body', null, "Request body field 'a': "],
 ], $entries, 'keys in insertion order, duplicate key keeps first position and last value');
 
 $t->section('walk: scalar renderings and leaf contexts');
 $entries = JsonWalk::walkEntries(JsonWalk::parse('{"s": "x", "n": 1.5, "i": -7, "b": true, "z": null}'), 'request_body');
 $t->same([
-    ['s', 'request_body', null],
-    ['x', 'request_body', null],
-    ['n', 'request_body', null],
-    ['1.5', 'request_body', null],
-    ['i', 'request_body', null],
-    ['-7', 'request_body', null],
-    ['b', 'request_body', null],
-    ['True', 'request_body', null],
-    ['z', 'request_body', null],
-    ['None', 'request_body', null],
+    ['s', 'request_body', null, "JSON key 's': "],
+    ['x', 'request_body', null, "Request body field 's': "],
+    ['n', 'request_body', null, "JSON key 'n': "],
+    ['1.5', 'request_body', null, "Request body field 'n': "],
+    ['i', 'request_body', null, "JSON key 'i': "],
+    ['-7', 'request_body', null, "Request body field 'i': "],
+    ['b', 'request_body', null, "JSON key 'b': "],
+    ['True', 'request_body', null, "Request body field 'b': "],
+    ['z', 'request_body', null, "JSON key 'z': "],
+    ['None', 'request_body', null, "Request body field 'z': "],
 ], $entries, 'str(value) renderings, plain request_body leaf context, no suffix on the body walk');
 
 $t->section('walk: mongo operator keys hit nosql straight from the walk');
 $entries = JsonWalk::walkEntries(JsonWalk::parse('{"$where": "1==1", "user": "x"}'), 'request_body');
-$t->same(['$where', 'request_body', 'nosql'], $entries[0], 'mongo operator key is a forced nosql hit');
+$t->same(true, ($entries[0][2] ?? null) === 'nosql' && str_starts_with((string) ($entries[0][3] ?? ''), "JSON operator key '\$where': matched pattern "), 'mongo operator key is a forced nosql hit with the reference trigger message');
 $entries = JsonWalk::walkEntries(JsonWalk::parse('{"query": {"$gt": ""}}'), 'request_body');
-$t->same(true, in_array(['$gt', 'request_body', 'nosql'], $entries, true), 'nested mongo operator key hits');
+$t->same(true, (function () use ($entries): bool {
+    foreach ($entries as $e) {
+        if (($e[2] ?? null) === 'nosql' && ($e[0] ?? null) === '$gt') {
+            return true;
+        }
+    }
+
+    return false;
+})(), 'nested mongo operator key hits');
 $entries = JsonWalk::walkEntries(JsonWalk::parse('{"$nonoperator": "x", "where": "x"}'), 'request_body');
 $forced = array_filter($entries, static fn (array $e): bool => $e[2] !== null);
 $t->same([], $forced, 'non-operator dollar keys and plain keys never force');
@@ -239,7 +247,7 @@ $contexts = array_map(static fn (array $e): string => $e[1], $entries);
 $t->same(false, in_array('request_body:embedded_json', $contexts, true), 'body JSON leaves never carry the suffix');
 $t->same(true, in_array('/default.asp', array_map(static fn (array $e): string => $e[0], $entries), true), 'leaf value present');
 $entries = BodyFormScan::bodyScanEntries('{"url": "x"}', 'text/plain', 16);
-$t->same([['{"url": "x"}', 'request_body', null]], $entries, 'non-json content types scan as the one raw body');
+$t->same([['{"url": "x"}', 'request_body', null, '']], $entries, 'non-json content types scan as the one raw body');
 
 $t->section('walk: excluded keys skip their whole subtree');
 $entries = JsonWalk::walkEntries(JsonWalk::parse('{"secret": {"a": "' . SCRIPT . '"}, "ok": 1}'), 'request_body', ['secret' => true]);

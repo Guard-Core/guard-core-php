@@ -91,8 +91,14 @@ final class RateLimitCheck extends SecurityCheck
             return null;
         }
 
-        $this->stashBlock($request, "Rate limit exceeded: {$outcome->count}/{$outcome->window} ({$outcome->tier} tier)", 'rate_limit');
+        // The hook reason mirrors the reference ratelimit_handler log
+        // format: the tripped tier's request count and window, with an
+        // empty trigger_info.
+        $reason = "Rate limit exceeded for IP: {$clientIp} ({$outcome->count} requests in {$outcome->window}s window)";
+        $this->stashBlock($request, $reason, '');
         if ($this->isPassiveMode()) {
+            $this->firePassiveBlockHook($request, $reason, '');
+
             return null;
         }
 

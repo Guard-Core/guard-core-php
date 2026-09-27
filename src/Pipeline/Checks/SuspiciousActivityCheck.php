@@ -97,16 +97,21 @@ final class SuspiciousActivityCheck extends SecurityCheck
         $enabledCategories = $this->resolveEnabledCategories($routeConfig);
 
         $categories = [];
-        foreach ($this->scanValues($request) as [$content, $context, $forcedCategory, $skipCategories]) {
+        $triggerInfo = '';
+        foreach ($this->scanValues($request) as [$content, $context, $forcedCategory, $skipCategories, $label]) {
+            // An unlabeled value is the whole-body blob: the reference
+            // _scan_blob_body composes "Request body: {trigger}".
+            $prefix = $label !== '' ? $label : 'Request body: ';
             if ($forcedCategory !== null) {
                 // JSON mongo-operator keys report straight from the walk
                 // (body_json_scan._mongo_operator_key_hit) without a pattern
-                // scan.
+                // scan; the walk carries the reference trigger message.
                 if (isset($enabledCategories[$forcedCategory])
                     && !isset($skipCategories[$forcedCategory])
                     && !in_array($forcedCategory, $categories, true)
                 ) {
                     $categories[] = $forcedCategory;
+                    $triggerInfo = $prefix;
                 }
                 continue;
             }
@@ -119,6 +124,7 @@ final class SuspiciousActivityCheck extends SecurityCheck
                         && isset($enabledCategories[$category])
                     ) {
                         $categories[] = $category;
+                        $triggerInfo = $prefix . self::threatMessage($threat);
                     }
                 }
             }
@@ -128,15 +134,30 @@ final class SuspiciousActivityCheck extends SecurityCheck
             return null;
         }
 
-        $triggerInfo = 'threat categories: ' . implode(',', $categories);
-        $this->stashBlock($request, 'Penetration patterns detected', $triggerInfo);
         foreach ($categories as $category) {
             $this->suspiciousCountStore->record($clientIp, $category);
         }
 
         if ($this->isPassiveMode()) {
+            // The reference _handle_suspicious_passive_mode: the hook fires
+            // inline with the short reason and the detection trigger_info.
+            $this->firePassiveBlockHook(
+                $request,
+                "Suspicious activity detected: {$clientIp}",
+                $triggerInfo
+            );
+
             return null;
         }
+
+        // Active mode: the reason embeds the detection trigger_info while
+        // the stash trigger_info stays empty, exactly like the reference
+        // _handle_suspicious_active_mode log_activity call.
+        $this->stashBlock(
+            $request,
+            "Suspicious activity detected for IP: {$clientIp} - {$triggerInfo}",
+            ''
+        );
 
         if ($this->config->enableIpBanning) {
             $count = $this->incrementCount($clientIp);
@@ -195,9 +216,11 @@ final class SuspiciousActivityCheck extends SecurityCheck
      * for address-carrying headers and address-chain values), carried as the
      * entry's skip-category set and filtered in check().
      *
-     * Each entry is [content, context, forcedCategory, skipCategories].
+     * Each entry is [content, context, forcedCategory, skipCategories,
+     * label], the label being the reference trigger prefix ("Request body:
+     * ", "Header 'x': ", ...) the DetectionResult.trigger_info reports.
      *
-     * @return list<array{string, string, ?string, array<string, true>}>
+     * @return list<array{string, string, ?string, array<string, true>, string}>
      */
     /**
      * Mirrors _resolve_enabled_categories: a non-null route category set
@@ -216,7 +239,7 @@ final class SuspiciousActivityCheck extends SecurityCheck
 
     private function scanValues(GuardRequest $request): array
     {
-        $values = [[$request->urlPath(), 'url_path', null, []]];
+        $values = [[$request->urlPath(), 'url_path', null, [], 'URL path: ']];
         $routeConfig = $request->state()->routeConfig;
         // The per-route exclusion surfaces, resolved with the reference's
         // _resolve_* helpers (guard_core/_utils/detection_config.py): a
@@ -239,7 +262,7 @@ final class SuspiciousActivityCheck extends SecurityCheck
                 continue;
             }
             foreach ((array) $value as $single) {
-                foreach ($this->scannedValue((string) $single, 'query_param', $excludedBodyFields) as $entry) {
+                foreach ($this->scannedValue((string) $single, 'query_param', "Query param '{$name}': ", $excludedBodyFields) as $entry) {
                     $values[] = $entry;
                 }
             }
@@ -252,15 +275,15 @@ final class SuspiciousActivityCheck extends SecurityCheck
             $skipCategories = isset($excludedHeaders[strtolower((string) $name)])
                 ? HeaderExclusions::skipCategories((string) $name, (string) $value)
                 : [];
-            foreach ($this->scannedValue((string) $value, 'header', $excludedBodyFields, $skipCategories) as $entry) {
+            foreach ($this->scannedValue((string) $value, 'header', "Header '" . strtolower((string) $name) . "': ", $excludedBodyFields, $skipCategories) as $entry) {
                 $values[] = $entry;
             }
         }
         $body = $request->body();
         if ($body !== '' && $scanBody) {
             $contentType = $headers->get('content-type') ?? '';
-            foreach (BodyFormScan::bodyScanEntries($body, $contentType, $this->config->detectionBinaryMinRunLength, $excludedBodyFields) as [$content, $context, $forcedCategory]) {
-                $values[] = [$content, $context, $forcedCategory, []];
+            foreach (BodyFormScan::bodyScanEntries($body, $contentType, $this->config->detectionBinaryMinRunLength, $excludedBodyFields) as [$content, $context, $forcedCategory, $label]) {
+                $values[] = [$content, $context, $forcedCategory, [], $label];
             }
         }
 
@@ -280,19 +303,49 @@ final class SuspiciousActivityCheck extends SecurityCheck
      * @param array<string, true> $skipCategories
      * @return list<array{string, string, null, array<string, true>}>
      */
-    private function scannedValue(string $value, string $context, array $excludedBodyFields = [], array $skipCategories = []): array
+    private function scannedValue(string $value, string $context, string $label, array $excludedBodyFields = [], array $skipCategories = []): array
     {
         $root = JsonWalk::parse($value);
         if ($root === null) {
-            return [[$value, $context, null, $skipCategories]];
+            return [[$value, $context, null, $skipCategories, $label]];
         }
         $entries = JsonWalk::walkEntries($root, $context . JsonWalk::EMBEDDED_JSON_LEAF_CONTEXT_SUFFIX, $excludedBodyFields);
-        foreach ($entries as $i => [$leaf, $leafContext, $leafForced]) {
-            $entries[$i] = [$leaf, $leafContext, $leafForced, $skipCategories];
+        foreach ($entries as $i => [$leaf, $leafContext, $leafForced, $leafLabel]) {
+            $entries[$i] = [$leaf, $leafContext, $leafForced, $skipCategories, $leafLabel];
         }
-        $entries[] = [$value, $context, null, $skipCategories];
+        $entries[] = [$value, $context, null, $skipCategories, $label];
 
         return $entries;
+    }
+
+    /**
+     * _build_threat_message (guard_core/_utils/detection_scan.py).
+     *
+     * @param array<string, mixed> $threat
+     */
+    private static function threatMessage(array $threat): string
+    {
+        $type = $threat['type'] ?? '';
+        if ($type === 'semantic') {
+            $attackType = is_string($threat['attack_type'] ?? null) ? $threat['attack_type'] : 'suspicious';
+            $score = 0.0;
+            if (isset($threat['probability']) && is_numeric($threat['probability'])) {
+                $score = (float) $threat['probability'];
+            } elseif (isset($threat['threat_score']) && is_numeric($threat['threat_score'])) {
+                $score = (float) $threat['threat_score'];
+            }
+
+            return sprintf('Semantic attack: %s (score: %.2f)', $attackType, $score);
+        }
+        if ($type === 'pattern_timeout') {
+            $pattern = is_string($threat['pattern'] ?? null) ? $threat['pattern'] : '';
+
+            return "Pattern exceeded scan time budget: '{$pattern}'";
+        }
+
+        $pattern = is_string($threat['pattern'] ?? null) ? $threat['pattern'] : '';
+
+        return "Value matched pattern '{$pattern}'";
     }
 
     private function incrementCount(string $ip): int

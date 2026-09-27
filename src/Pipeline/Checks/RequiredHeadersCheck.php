@@ -63,10 +63,11 @@ final class RequiredHeadersCheck extends SecurityCheck
 
     private function reportViolation(GuardRequest $request, string $header, string $reason, string $headerField): ?GuardResponse
     {
-        $this->stashBlock($request, $reason, $reason);
+        $this->stashBlock($request, $reason, '');
         if (!$this->isPassiveMode()) {
             return $this->createErrorResponse(400, $reason);
         }
+        $this->firePassiveBlockHook($request, $reason, '');
 
         return null;
     }
