@@ -1,9 +1,25 @@
 # Release Notes
 
-Unreleased
-----------
+v4.2.0 (2026-09-27)
+-------------------
+
+The parity release: guard-core-php 4.2.0 tracks the guard-core engine 4.2.0 release. This train closes the remaining pipeline divergences from the spec 4.1.0 corpus (the on_block hook payloads now carry the reference log-format reasons and the route-level IP and country rules are enforced), and the fail-closed xfail registry is emptied.
+
+Note on the 4.1.0 tags: the guard-core 4.1.0 family tags were a version-accuracy error and were yanked/unpublished (the 4.1.0 work itself is part of this 4.2.0 train; Packagist serves 4.2.0 from the v4.2.0 tag). The conformance corpus vendored here is the spec 4.1.0 corpus (219 cases across the detect and pipeline suites) and the pipeline gate runs green against it with an empty divergence registry.
+
+on_block corrections and route-level IP enforcement
+---------------------------------------------------
+
+### Fixed
+
+- **The on_block hook payloads now carry the reference log-format reasons with an empty trigger_info (the reference checks pass no trigger_info to log_activity), and route-level IP rules are enforced for the first time.** ip_security composes `IP not allowed: {ip} - {access reason}` over the access_control generic list block string and `IP not allowed by route config: {ip}` for route denials, rate_limit reports `Rate limit exceeded for IP: {ip} ({count} requests in {window}s window)` from the tripped tier, and suspicious_activity emits `Suspicious activity detected for IP: {ip} - {trigger_info}` active / `Suspicious activity detected: {ip}` passive with the detection trigger built from the reference component labels (Request body / Header / URL path / JSON key / Request body field) plus the first threat message; passive-mode dispatches fire the hook inline with a null status_code like the reference `_dispatch_block_hook`. The enforcement fix: route-level ip_whitelist (and ip_blacklist / route country rules) were absent from `RouteConfig` and the ip_security check entirely, so a non-whitelisted client passed where the reference denies 403. `RouteConfig` gains the `ipWhitelist`/`ipBlacklist`/`blockedCountries`/`whitelistCountries` fields with the route blacklist first, a configured route whitelist taking over the route verdict, the route country verdict combining with it, and a route IP whitelist clearing the identity flags without relaxing the global lists, with a regression test through `GuardEngine::execute`. The wildcard + credentials CORS combination is accepted at construction and downgraded at policy resolution (credentials dropped, wildcard answers without the allow-credentials header), and the CORS response surface composes methods/headers/3600 max-age like the reference `_build_cors_headers`. The 27 xfail entries are cleared leaving an empty fail-closed registry (pipeline gate: 35 passed, 0 failed, 0 xfail, 0 config divergences).
+
+### Verification
+
+- Full suite green on PHP 8.3 (Docker, php:8.3-cli + throwaway redis:7-alpine, no host php/composer): `bin/conformance.php` 184/184 (verdicts unchanged), `bin/conformance_pipeline.php` 35 passed / 0 failed / 0 xfail / 0 config divergences over the spec 4.1.0 corpus, and the full `bin/` runner list per the CI workflow.
 
 Per-route detection exclusions
+------------------------------
 ------------------------------
 
 ### Added
