@@ -55,10 +55,11 @@ final class EmergencyModeCheck extends SecurityCheck
 
         if (!$isWhitelisted) {
             $reason = "[EMERGENCY MODE] Access denied for IP {$clientIp}";
-            $this->stashBlock($request, $reason, $reason);
+            $this->stashBlock($request, $reason, '');
             if (!$this->isPassiveMode()) {
                 return $this->createErrorResponse(503, 'Service temporarily unavailable');
             }
+            $this->firePassiveBlockHook($request, $reason, '');
 
             return null;
         }

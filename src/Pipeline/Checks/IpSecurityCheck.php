@@ -12,6 +12,7 @@ use RenzoFranceschini\GuardCore\Pipeline\SecurityCheck;
 use RenzoFranceschini\GuardCore\Request\GuardRequest;
 use RenzoFranceschini\GuardCore\Request\GuardResponse;
 use RenzoFranceschini\GuardCore\Request\GuardResponseFactory;
+use RenzoFranceschini\GuardCore\Routing\RouteConfig;
 use RenzoFranceschini\GuardCore\Routing\RouteResolver;
 
 final class IpSecurityCheck extends SecurityCheck
@@ -49,10 +50,12 @@ final class IpSecurityCheck extends SecurityCheck
             && $this->ipBanManager !== null
             && $this->ipBanManager->isIpBanned($clientIp)
         ) {
-            $this->stashBlock($request, "Banned IP attempted access: {$clientIp}", 'banned');
+            $reason = "Banned IP attempted access: {$clientIp}";
+            $this->stashBlock($request, $reason, '');
             if (!$this->isPassiveMode()) {
                 return $this->createErrorResponse(403, 'IP address banned');
             }
+            $this->firePassiveBlockHook($request, $reason, '');
 
             return null;
         }
@@ -61,20 +64,36 @@ final class IpSecurityCheck extends SecurityCheck
             return null;
         }
 
+        $routeOverridesIpLists = false;
+        $skipCountries = false;
+
+        // The route IP/country stage (check_route_ip_access,
+        // guard_core/core/checks/helpers.py): the route blacklist denies
+        // first, a configured route whitelist takes over the route verdict
+        // (a miss denies, a match passes the route stage), and the route
+        // country verdict denies its match or a miss under a restrictive
+        // allowlist. The global lists are still enforced afterwards, so a
+        // route whitelist match never relaxes them; it only clears the
+        // identity flags, and a route allow_countries match clears the
+        // global country stage (the reference _route_country_whitelist_matched).
+        if ($routeConfig !== null) {
+            $routeResponse = $this->checkRouteIpAccess($request, $clientIp, $routeConfig);
+            if ($routeResponse !== null) {
+                return $routeResponse;
+            }
+            $routeOverridesIpLists = $routeConfig->ipWhitelist !== [];
+            $routeAllowed = $this->routeCountryVerdict($clientIp, $routeConfig);
+            if ($routeAllowed === true) {
+                $skipCountries = true;
+            }
+        }
+
         $whitelist = $this->config->whitelist;
         $whitelistActive = $whitelist !== null && $whitelist !== [];
-        $request->state()->isWhitelisted = false;
-        $request->state()->isExempt = false;
-        $skipCountries = false;
 
         foreach ($this->config->blacklist as $entry) {
             if (self::matches($entry, $clientIp)) {
-                $this->stashBlock($request, "IP blacklisted: {$clientIp}", 'global');
-                if (!$this->isPassiveMode()) {
-                    return $this->createErrorResponse(403, 'Forbidden');
-                }
-
-                return null;
+                return $this->deny($request, $clientIp, self::GENERIC_LIST_BLOCK_REASON);
             }
         }
 
@@ -87,14 +106,9 @@ final class IpSecurityCheck extends SecurityCheck
                 }
             }
             if (!$allowed) {
-                $this->stashBlock($request, "IP not in whitelist: {$clientIp}", 'global');
-                if (!$this->isPassiveMode()) {
-                    return $this->createErrorResponse(403, 'Forbidden');
-                }
-
-                return null;
+                return $this->deny($request, $clientIp, self::GENERIC_LIST_BLOCK_REASON);
             }
-            $request->state()->isWhitelisted = true;
+            $request->state()->isWhitelisted = !$routeOverridesIpLists;
             // A global whitelist match skips the country stage (the
             // reference sets skip_countries from the whitelist
             // membership), so a whitelisted IP is never country blocked.
@@ -121,17 +135,14 @@ final class IpSecurityCheck extends SecurityCheck
             $blocked = $this->config->blockedCountries;
             if ($country === null || $country === '') {
                 if ($allowed !== []) {
-                    return $this->denyCountry(
-                        $request,
-                        "IP {$clientIp} not in global allowlist/blocklist"
-                    );
+                    return $this->deny($request, $clientIp, self::GENERIC_LIST_BLOCK_REASON);
                 }
             } elseif ($allowed !== []) {
                 if (!in_array($country, $allowed, true)) {
-                    return $this->denyCountry($request, "IP from blocked country: {$country}");
+                    return $this->deny($request, $clientIp, "IP from blocked country: {$country}");
                 }
             } elseif (in_array($country, $blocked, true)) {
-                return $this->denyCountry($request, "IP from blocked country: {$country}");
+                return $this->deny($request, $clientIp, "IP from blocked country: {$country}");
             }
         }
 
@@ -143,7 +154,7 @@ final class IpSecurityCheck extends SecurityCheck
         // whitelist deny path above is untouched, so an exempt IP does not
         // pass a restrictive whitelist, and penetration detection ignores
         // the flag entirely.
-        if ($this->config->exemptIps !== []) {
+        if (!$routeOverridesIpLists && $this->config->exemptIps !== []) {
             foreach ($this->config->exemptIps as $entry) {
                 if (self::matches($entry, $clientIp)) {
                     $request->state()->isExempt = true;
@@ -155,6 +166,80 @@ final class IpSecurityCheck extends SecurityCheck
         return null;
     }
 
+    private const GENERIC_LIST_BLOCK_REASON = 'IP %s not in global allowlist/blocklist';
+
+    /**
+     * check_route_ip_access: the route blacklist denies first, then a
+     * configured route whitelist takes over the route verdict, then the
+     * route country verdict (a blocked-country match denies, a restrictive
+     * allowlist denies a miss). The deny reason and payload shapes mirror
+     * the reference ip_security check.
+     */
+    private function checkRouteIpAccess(GuardRequest $request, string $clientIp, RouteConfig $routeConfig): ?GuardResponse
+    {
+        $ipBlocked = false;
+        if ($routeConfig->ipBlacklist !== [] && $this->ipInList($clientIp, $routeConfig->ipBlacklist)) {
+            $ipBlocked = true;
+        } elseif ($routeConfig->ipWhitelist !== [] && !$this->ipInList($clientIp, $routeConfig->ipWhitelist)) {
+            $ipBlocked = true;
+        }
+
+        if (!$ipBlocked) {
+            $verdict = $this->routeCountryVerdict($clientIp, $routeConfig);
+            if ($verdict === false) {
+                $ipBlocked = true;
+            }
+        }
+
+        if (!$ipBlocked) {
+            return null;
+        }
+
+        $reason = "IP not allowed by route config: {$clientIp}";
+        $this->stashBlock($request, $reason, '');
+        if (!$this->isPassiveMode()) {
+            return $this->createErrorResponse(403, 'Forbidden');
+        }
+        $this->firePassiveBlockHook($request, $reason, '');
+
+        return null;
+    }
+
+    /**
+     * check_country_access verdict for the route lists: true when allowed,
+     * false when denied (a blocked-country match, or any miss under a
+     * restrictive route allowlist, including an unresolved country), null
+     * when the route carries no country rules.
+     */
+    private function routeCountryVerdict(string $clientIp, RouteConfig $routeConfig): ?bool
+    {
+        if ($routeConfig->blockedCountries === [] && $routeConfig->whitelistCountries === []) {
+            return null;
+        }
+        $country = $this->geoIpHandler?->getCountry($clientIp);
+        if ($routeConfig->whitelistCountries !== []) {
+            if ($country === null || $country === '') {
+                return false;
+            }
+
+            return in_array($country, $routeConfig->whitelistCountries, true);
+        }
+
+        return !($country !== null && $country !== '' && in_array($country, $routeConfig->blockedCountries, true));
+    }
+
+    /** @param list<string> $entries */
+    private function ipInList(string $ip, array $entries): bool
+    {
+        foreach ($entries as $entry) {
+            if (self::matches($entry, $ip)) {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
     private function hasCountryRules(): bool
     {
         if ($this->config->blockedCountries === [] && $this->config->whitelistCountries === []) {
@@ -164,12 +249,21 @@ final class IpSecurityCheck extends SecurityCheck
         return $this->geoIpHandler !== null;
     }
 
-    private function denyCountry(GuardRequest $request, string $reason): ?GuardResponse
+    /**
+     * The reference _check_global_ip_restrictions block path: the hook
+     * reason composes "IP not allowed: {ip} - {access reason}" over the
+     * generic list block string with an empty trigger_info, and the
+     * passive mode still fires the hook with a null status.
+     */
+    private function deny(GuardRequest $request, string $clientIp, string $accessReason): ?GuardResponse
     {
-        $this->stashBlock($request, $reason, 'country_restriction');
+        $accessReason = str_replace('%s', $clientIp, $accessReason);
+        $reason = "IP not allowed: {$clientIp} - {$accessReason}";
+        $this->stashBlock($request, $reason, '');
         if (!$this->isPassiveMode()) {
             return $this->createErrorResponse(403, 'Forbidden');
         }
+        $this->firePassiveBlockHook($request, $reason, '');
 
         return null;
     }

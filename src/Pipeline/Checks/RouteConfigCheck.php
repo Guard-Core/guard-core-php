@@ -43,10 +43,11 @@ final class RouteConfigCheck extends SecurityCheck
 
         if ($this->config->routeResolutionStrict && $state->guardRouteUnresolved === true) {
             $reason = 'Route resolution failed; per-route decorator config could not be applied';
-            $this->stashBlock($request, $reason, $reason);
+            $this->stashBlock($request, $reason, '');
             if (!$this->isPassiveMode()) {
                 return $this->createErrorResponse(500, 'Route resolution failed');
             }
+            $this->firePassiveBlockHook($request, $reason, '');
         }
 
         return null;

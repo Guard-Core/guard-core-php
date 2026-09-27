@@ -64,4 +64,19 @@ abstract class SecurityCheck
         }
         $request->state()->guardBlockStash = ['reason' => $reason, 'trigger_info' => $triggerInfo];
     }
+
+    /**
+     * The reference passive-mode dispatch (_dispatch_block_hook,
+     * _utils/request_logging.py): a check that would block fires the hook
+     * inline in passive mode with a null status_code and lets the request
+     * through.
+     */
+    protected function firePassiveBlockHook(GuardRequest $request, string $reason, string $triggerInfo): void
+    {
+        BlockEvents::fire(
+            $this->config->onBlock,
+            $request,
+            BlockEvents::buildPayload($request, $this->checkName(), $reason, $triggerInfo, true, null)
+        );
+    }
 }

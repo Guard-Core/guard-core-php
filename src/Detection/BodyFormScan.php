@@ -64,7 +64,7 @@ final class BodyFormScan
             }
         }
 
-        return [[$rawBody, 'request_body', null]];
+        return [[$rawBody, 'request_body', null, '']];
     }
 
     /**
@@ -84,11 +84,11 @@ final class BodyFormScan
             if (isset($excludedBodyFields[strtolower($name)])) {
                 continue;
             }
-            $entries[] = [$name, 'request_body', null];
+            $entries[] = [$name, 'request_body', null, "Form field name '{$name}': "];
             foreach (self::embeddedJsonEntries($value, self::FORM_FIELD_CONTEXT, $excludedBodyFields) as $entry) {
                 $entries[] = $entry;
             }
-            $entries[] = [$value, self::FORM_FIELD_CONTEXT, null];
+            $entries[] = [$value, self::FORM_FIELD_CONTEXT, null, "Request body field '{$name}': "];
         }
 
         return $entries;
@@ -121,12 +121,12 @@ final class BodyFormScan
             if ($values === []) {
                 continue;
             }
-            $entries[] = [$label, 'request_body', null];
+            $entries[] = [$label, 'request_body', null, "Multipart field name '{$label}': "];
             foreach ($values as $value) {
                 foreach (self::embeddedJsonEntries($value, self::MULTIPART_FIELD_CONTEXT, $excludedBodyFields) as $entry) {
                     $entries[] = $entry;
                 }
-                $entries[] = [$value, self::MULTIPART_FIELD_CONTEXT, null];
+                $entries[] = [$value, self::MULTIPART_FIELD_CONTEXT, null, "Request body field '{$label}': "];
             }
         }
 

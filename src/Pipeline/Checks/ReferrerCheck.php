@@ -42,20 +42,22 @@ final class ReferrerCheck extends SecurityCheck
 
         if ($referrer === '') {
             $reason = 'Missing referrer header';
-            $this->stashBlock($request, $reason, $reason);
+            $this->stashBlock($request, $reason, '');
             if (!$this->isPassiveMode()) {
                 return $this->createErrorResponse(403, 'Referrer required');
             }
+            $this->firePassiveBlockHook($request, $reason, '');
 
             return null;
         }
 
         if (!self::isReferrerDomainAllowed($referrer, $routeConfig->requireReferrer)) {
             $reason = "Invalid referrer: {$referrer}";
-            $this->stashBlock($request, $reason, $reason);
+            $this->stashBlock($request, $reason, '');
             if (!$this->isPassiveMode()) {
                 return $this->createErrorResponse(403, 'Invalid referrer');
             }
+            $this->firePassiveBlockHook($request, $reason, '');
 
             return null;
         }

@@ -118,10 +118,11 @@ final class AuthenticationCheck extends SecurityCheck
 
     private function handleFailure(GuardRequest $request, RouteConfig $routeConfig, string $reason, bool $headerPresence = false): ?GuardResponse
     {
-        $this->stashBlock($request, "Authentication failure: {$reason}", $reason);
+        $this->stashBlock($request, "Authentication failure: {$reason}", '');
         if (!$this->isPassiveMode()) {
             return $this->createErrorResponse(401, 'Authentication required');
         }
+        $this->firePassiveBlockHook($request, "Authentication failure: {$reason}", '');
 
         return null;
     }

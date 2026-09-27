@@ -38,6 +38,16 @@ final class JsonWalk
 {
     public const EMBEDDED_JSON_LEAF_CONTEXT_SUFFIX = ':embedded_json';
 
+    /**
+     * The reference _scan_body_field trigger prefix for a named field
+     * ("Request body field 'x': "); an empty label (a top-level leaf) scans
+     * as the plain "Request body: " component and carries no prefix here.
+     */
+    public static function bodyFieldLabel(string $label): string
+    {
+        return $label === '' ? '' : "Request body field '{$label}': ";
+    }
+
     /** Objects and arrays at this frame depth serialize compactly (Python _DEFAULT_MAX_JSON_DEPTH). */
     public const DEPTH_CAP = 32;
 
@@ -85,17 +95,20 @@ final class JsonWalk
                     continue;
                 }
                 if (preg_match(self::MONGO_OPERATOR_KEY_RE, $keyStr) === 1) {
-                    $entries[] = [$keyStr, self::REQUEST_BODY_CONTEXT, 'nosql'];
+                    // The reference _mongo_operator_key_hit trigger message:
+                    // the operator key plus the pattern source it matched.
+                    $patternSource = "^\\\\\$(?:ne|gt|gte|lt|lte|eq|in|nin|nor|and|or|not|all|size|exists|type|mod|options|where|regex|expr|function|elemMatch)\$";
+                    $entries[] = [$keyStr, self::REQUEST_BODY_CONTEXT, 'nosql', "JSON operator key '{$keyStr}': matched pattern '{$patternSource}'"];
                     continue;
                 }
-                $entries[] = [$keyStr, self::REQUEST_BODY_CONTEXT, null];
+                $entries[] = [$keyStr, self::REQUEST_BODY_CONTEXT, null, "JSON key '{$keyStr}': "];
                 $stack[] = ['isEntry' => false, 'node' => $frame['item'], 'label' => $keyStr, 'depth' => $frame['depth'] + 1];
                 continue;
             }
             $node = $frame['node'];
             if (is_object($node)) {
                 if ($frame['depth'] >= self::DEPTH_CAP) {
-                    $entries[] = [self::serializeCompact($node), $context, null];
+                    $entries[] = [self::serializeCompact($node), $context, null, self::bodyFieldLabel($frame['label'])];
                     continue;
                 }
                 $props = get_object_vars($node);
@@ -107,7 +120,7 @@ final class JsonWalk
             }
             if (is_array($node)) {
                 if ($frame['depth'] >= self::DEPTH_CAP) {
-                    $entries[] = [self::serializeCompact($node), $context, null];
+                    $entries[] = [self::serializeCompact($node), $context, null, self::bodyFieldLabel($frame['label'])];
                     continue;
                 }
                 for ($i = count($node) - 1; $i >= 0; $i--) {
@@ -130,11 +143,11 @@ final class JsonWalk
                     // nothing, the raw leaf string still scans with the walk
                     // context, so payloads confined to the raw text
                     // (duplicate-key remnants, structural text) still hit.
-                    $entries[] = [$node, $context, null];
+                    $entries[] = [$node, $context, null, self::bodyFieldLabel($frame['label'])];
                     continue;
                 }
             }
-            $entries[] = [self::scalarText($node), $context, null];
+            $entries[] = [self::scalarText($node), $context, null, self::bodyFieldLabel($frame['label'])];
         }
 
         return $entries;

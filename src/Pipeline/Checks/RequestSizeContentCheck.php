@@ -50,10 +50,11 @@ final class RequestSizeContentCheck extends SecurityCheck
                 }
                 if ((int) $contentLength > $routeConfig->maxRequestSize) {
                     $reason = "Request size {$contentLength} exceeds limit: {$routeConfig->maxRequestSize}";
-                    $this->stashBlock($request, $reason, $reason);
+                    $this->stashBlock($request, $reason, '');
                     if (!$this->isPassiveMode()) {
                         return $this->createErrorResponse(413, 'Request too large');
                     }
+                    $this->firePassiveBlockHook($request, $reason, '');
 
                     return null;
                 }
@@ -65,10 +66,11 @@ final class RequestSizeContentCheck extends SecurityCheck
             $contentType = explode(';', $raw, 2)[0];
             if (!in_array($contentType, $routeConfig->allowedContentTypes, true)) {
                 $reason = "Invalid content type: {$contentType}";
-                $this->stashBlock($request, $reason, $reason);
+                $this->stashBlock($request, $reason, '');
                 if (!$this->isPassiveMode()) {
                     return $this->createErrorResponse(415, 'Unsupported content type');
                 }
+                $this->firePassiveBlockHook($request, $reason, '');
 
                 return null;
             }

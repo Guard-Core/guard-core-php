@@ -71,6 +71,17 @@ final class CorsPolicy
         }
         $this->allowHeaders = $allowHeaders;
         $this->allowCredentials = $allowCredentials;
+        if ($this->allowAllOrigins && $this->allowCredentials) {
+            // The reference _compute_cors_config
+            // (guard_core/handlers/_security_headers_config.py) downgrades
+            // the wildcard + credentials misconfiguration at resolution time
+            // instead of rejecting the configuration: it logs the error and
+            // drops the credentials flag, so the wildcard policy answers
+            // without the allow-credentials header (the browser blocks
+            // credentialed CORS).
+            error_log('CORS config error: Wildcard origin disallowed with credentials');
+            $this->allowCredentials = false;
+        }
         // The reference reads `config.cors_max_age or 600`: a configured 0
         // falls back to 600.
         $this->maxAge = $maxAge === 0 ? 600 : $maxAge;
@@ -206,6 +217,16 @@ final class CorsPolicy
         } else {
             return [];
         }
+
+        // The reference get_cors_headers always composes the full CORS
+        // surface on a CORS-enabled response
+        // (_security_headers_cors.py _build_cors_headers): methods, headers
+        // and a hardcoded 3600 max-age.
+        $result['Access-Control-Allow-Methods'] = implode(', ', $this->allowMethods);
+        $result['Access-Control-Allow-Headers'] = $this->allowAllHeaders
+            ? '*'
+            : implode(', ', $this->allowHeaders);
+        $result['Access-Control-Max-Age'] = '3600';
 
         if ($this->allowCredentials) {
             $result['Access-Control-Allow-Credentials'] = 'true';
