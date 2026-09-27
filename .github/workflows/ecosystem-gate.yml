@@ -82,6 +82,7 @@ jobs:
         run: |
           python3 - <<'EOF'
           import json
+          import os
 
           engine = "guard-core-php/composer.json"
           with open(engine) as f:
@@ -94,13 +95,16 @@ jobs:
           consumer = "${{ matrix.consumer.path }}/composer.json"
           with open(consumer) as f:
               d = json.load(f)
+          # Drop every VCS repo entry (any github fallback hard-fails on
+          # anonymous API auth now) and every path entry whose directory is
+          # not checked out in this workspace (slim-guard also carries a
+          # psr15-guard pair whose sibling does not exist here; it resolves
+          # from Packagist instead).
           d["repositories"] = [
               repo
               for repo in d.get("repositories", [])
-              if not (
-                  repo.get("type") == "vcs"
-                  and "guard-core-php" in repo.get("url", "")
-              )
+              if repo.get("type") == "path"
+              and os.path.isdir(os.path.join("${{ matrix.consumer.path }}", repo.get("url", "")))
           ]
           with open(consumer, "w") as f:
               json.dump(d, f, indent=4)
