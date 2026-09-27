@@ -70,6 +70,43 @@ jobs:
           ref: ${{ github.event.inputs.consumer_ref }}
           path: ${{ matrix.consumer.path }}
 
+      # guard-core-php v4.1.0 was yanked: the tag is deleted and Packagist
+      # no longer lists it, so ^4.1.0 cannot resolve from Packagist and the
+      # consumer's github VCS fallback hard-fails (anonymous GitHub API auth).
+      # CI-only patch, runner filesystem only, published files untouched:
+      # stamp a version onto this checkout's composer.json so the consumer's
+      # path repository supplies a ^4.1.0 version without git (shallow
+      # detached checkout, dubious ownership inside the container), and drop
+      # the engine VCS repo entry so composer never eagerly clones github.
+      - name: Resolve the engine from this checkout (CI-only patch)
+        run: |
+          python3 - <<'EOF'
+          import json
+
+          engine = "guard-core-php/composer.json"
+          with open(engine) as f:
+              d = json.load(f)
+          d["version"] = "4.1.99"
+          with open(engine, "w") as f:
+              json.dump(d, f, indent=4)
+              f.write("\n")
+
+          consumer = "${{ matrix.consumer.path }}/composer.json"
+          with open(consumer) as f:
+              d = json.load(f)
+          d["repositories"] = [
+              repo
+              for repo in d.get("repositories", [])
+              if not (
+                  repo.get("type") == "vcs"
+                  and "guard-core-php" in repo.get("url", "")
+              )
+          ]
+          with open(consumer, "w") as f:
+              json.dump(d, f, indent=4)
+              f.write("\n")
+          EOF
+
       # No host PHP toolchain: composer:2 (composer over a PHP CLI image)
       # installs the consumer suite and points its guard-core-php path
       # repository at this checkout, then php:8.3-cli runs the suite.
