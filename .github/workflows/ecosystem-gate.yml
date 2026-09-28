@@ -75,7 +75,7 @@ jobs:
       # consumer's github VCS fallback hard-fails (anonymous GitHub API auth).
       # CI-only patch, runner filesystem only, published files untouched:
       # stamp a version onto this checkout's composer.json so the consumer's
-      # path repository supplies a ^4.1.0 version without git (shallow
+      # path repository supplies a ^4.2.0 version without git (shallow
       # detached checkout, dubious ownership inside the container), and drop
       # the engine VCS repo entry so composer never eagerly clones github.
       - name: Resolve the engine from this checkout (CI-only patch)
@@ -87,7 +87,7 @@ jobs:
           engine = "guard-core-php/composer.json"
           with open(engine) as f:
               d = json.load(f)
-          d["version"] = "4.1.99"
+          d["version"] = "4.2.99"
           with open(engine, "w") as f:
               json.dump(d, f, indent=4)
               f.write("\n")
