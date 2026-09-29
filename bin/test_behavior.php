@@ -467,6 +467,50 @@ if ($redisUp) {
     $redis->deletePattern('behavior_usage:behavior:usage:*');
 }
 
+$t->section('tracker: response pattern edges');
+
+$t->same([false, true], $tracker->checkResponsePattern($factory->createResponse('x', 200), 'status:oops'), 'a non-integer status pattern evaluates false');
+$t->same([false, true], $onTracker->checkResponsePattern(null, 'denied'), 'a null body is not evaluated for substring patterns');
+$t->same([false, true], $onTracker->checkResponsePattern($factory->createResponse('', 200), 'denied'), 'an empty body is not evaluated for substring patterns');
+$t->same([true, true], $onTracker->checkResponsePattern($factory->createResponse('[1, 2]', 200), 'json:0==1'), 'a json array body indexes numerically');
+$t->same([false, true], $onTracker->checkResponsePattern($factory->createResponse('x', 200), 'regex:([unclosed'), 'an invalid regex evaluates false with an error log');
+$t->same([true, true], $onTracker->checkResponsePattern($factory->createResponse('{"a": {"b": "YES"}}', 200), 'json:a.b==yes'), 'nested json paths match');
+$t->same([false, true], $onTracker->checkResponsePattern($factory->createResponse('{"a": 1}', 200), 'json:nope==1'), 'a missing json path is a mismatch');
+$t->same(false, (new BehaviorTracker(new SecurityConfig(enableRedis: false, behaviorScanResponseBody: true), null, null))->trackReturnPattern('GET:/x', '10.2.0.9', $resp, new BehaviorRule('return_pattern', 2, window: 60), $now), 'a rule without a pattern never counts');
+
+$t->section('tracker: redis failure handling');
+
+$deadRedis = new RenzoFranceschini\GuardCore\Redis\RedisHandler(
+    enableRedis: true,
+    prefix: 'guard_core_test_dead:',
+    host: '127.0.0.1',
+    port: 1
+);
+$closedConfig = new SecurityConfig(enableRedis: true, redisFailOpen: false);
+$closedTracker = new BehaviorTracker($closedConfig, $deadRedis, null);
+$openTracker = new BehaviorTracker(new SecurityConfig(enableRedis: true, redisFailOpen: true), $deadRedis, null);
+$usageRule = new BehaviorRule('usage', 2, window: 60);
+$returnRuleDead = new BehaviorRule('return_pattern', 2, window: 60, pattern: 'denied');
+$t->same(false, $closedTracker->trackEndpointUsage('GET:/dead', '10.3.0.1', $usageRule, $now), 'fail-closed usage tracking reports false when redis is down');
+$t->same(false, $closedTracker->trackReturnPattern('GET:/dead', '10.3.0.1', $resp, $returnRuleDead, $now), 'fail-closed return tracking reports false when redis is down');
+$t->ok(is_bool($openTracker->trackEndpointUsage('GET:/dead', '10.3.0.2', $usageRule, $now)), 'fail-open usage tracking falls back to local counting');
+$t->ok(is_bool($openTracker->trackReturnPattern('GET:/dead', '10.3.0.2', $resp, $returnRuleDead, $now)), 'fail-open return tracking falls back to local counting');
+
+$t->section('tracker: redis-backed return rules');
+
+if ($redisUp) {
+    $redisTracker = new BehaviorTracker(new SecurityConfig(enableRedis: true), $redis, null);
+    $redisReturnRule = new BehaviorRule('return_pattern', 1, window: 60, pattern: 'status:503');
+    $rResp = $factory->createResponse('unavailable', 503);
+    $rNow = microtime(true);
+    $redisResults = [
+        $redisTracker->trackReturnPattern('GET:/redis-return', '10.9.8.7', $rResp, $redisReturnRule, $rNow),
+        $redisTracker->trackReturnPattern('GET:/redis-return', '10.9.8.7', $rResp, $redisReturnRule, $rNow + 1),
+    ];
+    $t->same([false, true], $redisResults, 'the redis return window trips on the second match');
+    $redis->deletePattern('behavior_returns:behavior:return:*');
+}
+
 $t->section('engine: zero rules means zero behavior change');
 $logs = [];
 $engine = behaviorLoggingEngine($logs, );

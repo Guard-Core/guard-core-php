@@ -40,6 +40,17 @@ final class T
         $this->same(true, (bool) $actual, $label);
     }
 
+    public function throws(callable $fn, string $class, string $label): void
+    {
+        try {
+            $fn();
+            $this->failed++;
+            echo "FAIL - {$label}: no exception\n";
+        } catch (Throwable $e) {
+            $this->same($class, $e::class, $label);
+        }
+    }
+
     public function section(string $name): void
     {
         echo "\n=== {$name} ===\n";
@@ -343,7 +354,30 @@ $t->truthy(array_search('request_logging', CheckFactory::DEFAULT_CHECK_NAMES, tr
 $t->truthy(array_search('custom_validators', CheckFactory::DEFAULT_CHECK_NAMES, true) < array_search('time_window', CheckFactory::DEFAULT_CHECK_NAMES, true), 'custom_validators is slot 9');
 $t->truthy(array_search('custom_request', CheckFactory::DEFAULT_CHECK_NAMES, true) === 16, 'custom_request is slot 17');
 
+$t->section('config: validation edges');
+
+$t->throws(static fn () => new SecurityConfig(autoBanThreshold: 0), InvalidArgumentException::class, 'auto_ban_threshold below 1 rejected');
+$t->throws(static fn () => new SecurityConfig(autoBanDuration: 0), InvalidArgumentException::class, 'auto_ban_duration below 1 rejected');
+$t->throws(static fn () => new SecurityConfig(detectionSemanticThreshold: 1.5), InvalidArgumentException::class, 'semantic threshold above 1 rejected');
+$t->throws(static fn () => new SecurityConfig(whitelistCountries: ['US'], blockedCountries: ['CN']), InvalidArgumentException::class, 'blocked countries alongside whitelist rejected');
+$t->throws(static fn () => new SecurityConfig(customErrorResponses: ['oops' => 'x']), InvalidArgumentException::class, 'non-int status in custom responses rejected');
+$t->throws(static fn () => new SecurityConfig(blockedUserAgents: ['']), InvalidArgumentException::class, 'empty user agent pattern rejected');
+$t->throws(static fn () => new SecurityConfig(blockCloudProviders: [5]), InvalidArgumentException::class, 'non-string cloud selector rejected');
+$t->throws(static fn () => (new SecurityConfig())->with(['definitely_not_a_field' => 1]), InvalidArgumentException::class, 'unknown config field rejected');
+$t->throws(static fn () => new SecurityConfig(threatBanConfig: ['xss' => ['threshold' => 1]]), InvalidArgumentException::class, 'threat ban config missing duration rejected');
+$t->throws(static fn () => new SecurityConfig(endpointRateLimits: ['/x' => ['limit' => 5]]), InvalidArgumentException::class, 'endpoint rate limit missing window rejected');
+
+$t->section('redaction: remaining url edges');
+
+$escapedUrl = LogRedactor::redactUrlForDisplay('no colon space slashes here');
+$t->same('no colon space slashes here', $escapedUrl, 'unparseable urls survive');
+$portUrl = LogRedactor::redactUrlForDisplay('https://example.test:8443/p?a=1#frag');
+$t->same(true, str_contains($portUrl, ':8443'), 'ports survive redaction');
+$t->same(true, str_contains($portUrl, '#frag'), 'fragments survive redaction');
+$t->same(true, LogRedactor::sensitiveNames(['extra_param'], ['extra_body'], ['Extra_Header']) !== [], 'sensitive names merge extras');
+
 $total = $t->passed + $t->failed;
+
 echo "\nPassed: {$t->passed}, Failed: {$t->failed}\n";
 echo "{$t->passed}/{$total}" . ($t->failed === 0 ? ' GREEN' : ' RED') . "\n";
 exit($t->failed === 0 ? 0 : 1);

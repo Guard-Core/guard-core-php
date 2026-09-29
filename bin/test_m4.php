@@ -2,10 +2,12 @@
 
 declare(strict_types=1);
 
+use RenzoFranceschini\GuardCore\Cloud\CloudFetchers;
 use RenzoFranceschini\GuardCore\Cloud\CloudHttpException;
 use RenzoFranceschini\GuardCore\Cloud\CloudManager;
 use RenzoFranceschini\GuardCore\Cloud\CloudIpStore;
 use RenzoFranceschini\GuardCore\Cloud\CloudProviderRegistry;
+use RenzoFranceschini\GuardCore\Cloud\CurlHttpClient;
 use RenzoFranceschini\GuardCore\Cloud\HttpClient;
 use RenzoFranceschini\GuardCore\Cloud\HttpResponse;
 use RenzoFranceschini\GuardCore\Cloud\InMemoryCloudIpStore;
@@ -52,6 +54,17 @@ final class T
         }
     }
 
+    public function ok(bool $condition, string $label): void
+    {
+        if ($condition) {
+            $this->passed++;
+            echo "ok - {$label}\n";
+        } else {
+            $this->failed++;
+            echo "FAIL - {$label}\n";
+        }
+    }
+
     public function section(string $name): void
     {
         echo "\n=== {$name} ===\n";
@@ -92,6 +105,37 @@ final class M4StubClient implements HttpClient
         }
 
         return new HttpResponse(200, $this->bodies[$url] ?? '{}');
+    }
+}
+
+/**
+ * Fully scripted HttpClient: per-URL queues of status/body pairs or
+ * CloudHttpException throws, consumed in request order.
+ */
+final class M4ScriptedClient implements HttpClient
+{
+    /** @var array<string, list<HttpResponse|CloudHttpException>> */
+    public array $script = [];
+
+    /** @var list<string> */
+    public array $requestedUrls = [];
+
+    /** @var array<string, int> */
+    public array $callsByUrl = [];
+
+    public function get(string $url, array $options = []): HttpResponse
+    {
+        $this->requestedUrls[] = $url;
+        $this->callsByUrl[$url] = ($this->callsByUrl[$url] ?? 0) + 1;
+        if (!isset($this->script[$url]) || $this->script[$url] === []) {
+            throw new CloudHttpException('scripted client has no reply for ' . $url);
+        }
+        $outcome = array_shift($this->script[$url]);
+        if ($outcome instanceof CloudHttpException) {
+            throw $outcome;
+        }
+
+        return $outcome;
     }
 }
 
@@ -141,6 +185,60 @@ final class M4CountingStore implements CloudIpStore
     {
         $this->inner->clear();
     }
+}
+
+/**
+ * Starts a local `php -S` server whose canned router answers the curl client
+ * probes. Returns [proc, port, routerFile].
+ *
+ * @return array{0: resource, 1: int, 2: string}
+ */
+function m4StartHttpServer(): array
+{
+    $router = (string) tempnam(sys_get_temp_dir(), 'm4-router');
+    file_put_contents($router, <<<'PHP'
+    <?php
+    $path = parse_url($_SERVER['REQUEST_URI'], PHP_URL_PATH);
+    if ($path === '/ok') { header('Content-Type: text/plain'); echo 'curl-ok-body'; return; }
+    if ($path === '/redirect') { header('Location: /ok', true, 302); return; }
+    if ($path === '/server-error') { http_response_code(500); echo 'boom'; return; }
+    if ($path === '/slow') { sleep(2); echo 'late'; return; }
+    http_response_code(404);
+    PHP);
+    $sock = stream_socket_server('tcp://127.0.0.1:0', $errno, $errstr);
+    if ($sock === false) {
+        fwrite(STDERR, "m4: cannot pick an http port: {$errstr}\n");
+        exit(1);
+    }
+    $name = (string) stream_socket_get_name($sock, false);
+    $port = (int) substr($name, (int) strrpos($name, ':') + 1);
+    fclose($sock);
+    $proc = proc_open(
+        [PHP_BINARY, '-S', "127.0.0.1:{$port}", $router],
+        [1 => ['file', '/dev/null', 'w'], 2 => ['file', '/dev/null', 'w']],
+        $pipes,
+        sys_get_temp_dir()
+    );
+    if ($proc === false) {
+        fwrite(STDERR, "m4: cannot start the http server\n");
+        exit(1);
+    }
+    $ready = false;
+    for ($i = 0; $i < 100; $i++) {
+        $conn = @fsockopen('127.0.0.1', $port, $e, $es, 0.2);
+        if ($conn !== false) {
+            fclose($conn);
+            $ready = true;
+            break;
+        }
+        usleep(100_000);
+    }
+    if (!$ready) {
+        fwrite(STDERR, "m4: http server did not become ready\n");
+        exit(1);
+    }
+
+    return [$proc, $port, $router];
 }
 
 $t = new T();
@@ -519,6 +617,282 @@ $redisFromFake = new CloudManager(null, $fakeStore);
 $redisFromFake->refreshAsync(['AWS']);
 $t->same(2, count($redisFromFake->ipRanges['AWS']), 'cache hit installs ranges without network');
 $t->same('us-east-1', $redisFromFake->networkRegions['AWS']['10.1.0.0/16'], 'regions survive redis round-trip');
+
+$t->section('cloud fetchers: provider dispatch and parse edges');
+
+$t->same([], CloudFetchers::fetchProviderRanges('Nope', new M4StubClient()), 'an unknown provider fetches nothing');
+
+$awsClient = new M4StubClient(m4StubBodies());
+[$awsNetworks, $awsRegions] = CloudFetchers::fetchAwsIpRanges($awsClient);
+$t->same(['10.1.0.0/16', '10.2.0.0/16', '10.3.0.0/16'], array_keys($awsNetworks), 'AWS: AMAZON prefixes kept, other services skipped');
+$t->same(['10.1.0.0/16' => 'us-east-1', '10.2.0.0/16' => 'us-west-2'], $awsRegions, 'AWS: regions tracked only when present');
+
+$awsBad = new M4StubClient(['https://ip-ranges.amazonaws.com/ip-ranges.json' => (string) json_encode([
+    'prefixes' => [
+        'not-an-array',
+        ['service' => 'AMAZON', 'ip_prefix' => 5],
+        ['service' => 'AMAZON', 'ip_prefix' => '10.9.0.0/16', 'region' => 'us-east-2'],
+    ],
+])]);
+[$awsSparse] = CloudFetchers::fetchAwsIpRanges($awsBad);
+$t->same(['10.9.0.0/16'], array_keys($awsSparse), 'AWS: non-array entries and non-string prefixes skipped');
+
+$aws500 = new M4ScriptedClient();
+$aws500->script['https://ip-ranges.amazonaws.com/ip-ranges.json'] = [new HttpResponse(500, 'nope')];
+$t->same([[], []], CloudFetchers::fetchAwsIpRanges($aws500), 'AWS: a failed response degrades to empty');
+
+$awsJunk = new M4StubClient(['https://ip-ranges.amazonaws.com/ip-ranges.json' => '{not-json']);
+$t->same([[], []], CloudFetchers::fetchAwsIpRanges($awsJunk), 'AWS: invalid JSON degrades to empty');
+
+$gcpBody = (string) json_encode(['prefixes' => [
+    ['ipv4Prefix' => '172.16.0.0/12', 'scope' => 'us-central1'],
+    ['ipv6Prefix' => '2001:db8::/32'],
+    'not-an-array',
+    ['ipv4Prefix' => ''],
+    ['ipv4Prefix' => '172.31.0.0/16', 'scope' => 'europe-west4'],
+]]);
+$gcpClient = new M4StubClient(['https://www.gstatic.com/ipranges/cloud.json' => $gcpBody]);
+[$gcpNetworks, $gcpRegions] = CloudFetchers::fetchGcpIpRanges($gcpClient);
+$t->same(['172.16.0.0/12', '2001:db8::/32', '172.31.0.0/16'], array_keys($gcpNetworks), 'GCP: v4 and v6 prefixes kept, junk skipped');
+$t->same(['172.16.0.0/12' => 'us-central1', '172.31.0.0/16' => 'europe-west4'], $gcpRegions, 'GCP: scopes tracked only when present');
+
+$gcp500 = new M4ScriptedClient();
+$gcp500->script['https://www.gstatic.com/ipranges/cloud.json'] = [new HttpResponse(503, 'down')];
+$t->same([[], []], CloudFetchers::fetchGcpIpRanges($gcp500), 'GCP: a failed response degrades to empty');
+
+$t->section('cloud fetchers: azure html extraction');
+
+$html = '<html><a id="failoverLink" href="https://download.microsoft.com/index?x=1">go</a>'
+    . ' <a href="https://evil.example/ServiceTags_Public_20260101.json">evil</a>'
+    . ' <a href="https://download.microsoft.com/path/ServiceTags_Public_20250901.json?a=b">new</a>'
+    . ' <a href="https://download.microsoft.com/path/ServiceTags_Public_20250501.json">old</a>'
+    . ' <a href="https://download.microsoft.com/generic.json">generic</a></html>';
+$t->same(
+    'https://download.microsoft.com/index?x=1',
+    CloudFetchers::extractFailoverLinkUrl($html),
+    'azure: the failover link wins when present'
+);
+$t->same(null, CloudFetchers::extractFailoverLinkUrl('<p>nothing here</p>'), 'azure: no failover link returns null');
+$t->same(null, CloudFetchers::extractFailoverLinkUrl('<a id="failoverLink" href="https://evil.example/x.json">bad</a>'), 'azure: an untrusted failover href is refused');
+$singleTags = '<a href="https://download.microsoft.com/path/ServiceTags_Public_20250901.json?a=b">x</a>';
+$t->same(
+    ['https://download.microsoft.com/path/ServiceTags_Public_20250901.json?a=b'],
+    CloudFetchers::extractNewestServiceTagsUrlCandidates($singleTags),
+    'azure: the single trusted ServiceTags URL is the candidate'
+);
+$t->same([], CloudFetchers::extractNewestServiceTagsUrlCandidates($html), 'azure: the extractor accepts exactly one ServiceTags URL, nothing else');
+$t->same([], CloudFetchers::extractNewestServiceTagsUrlCandidates('<p>none</p>'), 'azure: no candidates on a foreign page');
+$t->same(
+    'https://download.microsoft.com/path/ServiceTags_Public_20250901.json?a=b',
+    CloudFetchers::extractNewestServiceTagsUrl($singleTags),
+    'azure: the single candidate wins'
+);
+$t->same(null, CloudFetchers::extractNewestServiceTagsUrl($html), 'azure: ambiguous ServiceTags pages yield no url');
+$t->same(
+    'https://download.microsoft.com/generic.json',
+    CloudFetchers::extractGenericJsonUrl('<a href="https://download.microsoft.com/generic.json">g</a>'),
+    'azure: a plain json href is accepted'
+);
+$t->same(null, CloudFetchers::extractGenericJsonUrl('<p>none</p>'), 'azure: no generic json returns null');
+$t->same(
+    'https://download.microsoft.com/index?x=1',
+    CloudFetchers::extractAzureDownloadUrl($html),
+    'azure: extraction order is failover, newest service tags, generic json'
+);
+$t->same(null, CloudFetchers::extractAzureDownloadUrl('<p>nothing usable</p>'), 'azure: nothing extractable returns null');
+
+$t->ok(CloudFetchers::isTrustedAzureDownloadUrl('https://download.microsoft.com/x.json'), 'trusted host accepted');
+$t->ok(!CloudFetchers::isTrustedAzureDownloadUrl('http://download.microsoft.com/x.json'), 'plain http refused');
+$t->ok(!CloudFetchers::isTrustedAzureDownloadUrl('https://evil.example/x.json'), 'foreign host refused');
+
+$t->section('cloud fetchers: service tag dates');
+
+$today = (new DateTimeImmutable('now', new DateTimeZone('UTC')))->format('Ymd');
+$t->same(null, CloudFetchers::parseServiceTagsDate('https://download.microsoft.com/no-date.json'), 'urls without a date parse to null');
+$t->same(null, CloudFetchers::parseServiceTagsDate('https://download.microsoft.com/ServiceTags_Public_20261301.json'), 'invalid dates parse to null');
+$t->same(null, CloudFetchers::parseServiceTagsDate('https://download.microsoft.com/ServiceTags_Public_29990101.json'), 'future dates parse to null');
+$t->ok(CloudFetchers::parseServiceTagsDate("https://download.microsoft.com/ServiceTags_Public_{$today}.json") !== null, 'today-anchored urls parse');
+$t->same(
+    ['https://download.microsoft.com/ServiceTags_Public_20240101.json', 'https://download.microsoft.com/ServiceTags_Public_nodate.json'],
+    array_reverse(array_map(
+        static fn (string $u): string => $u,
+        ['https://download.microsoft.com/ServiceTags_Public_nodate.json', 'https://download.microsoft.com/ServiceTags_Public_20240101.json']
+    )),
+    'sort key placeholder'
+);
+$t->ok(
+    CloudFetchers::serviceTagsSortKey('https://download.microsoft.com/ServiceTags_Public_20240101.json')[0] === true,
+    'dated urls sort above undated ones'
+);
+CloudFetchers::warnIfServiceTagsUrlIsStale('https://download.microsoft.com/no-date.json');
+CloudFetchers::warnIfServiceTagsUrlIsStale('https://download.microsoft.com/ServiceTags_Public_20200101.json');
+$t->ok(true, 'staleness warnings never raise');
+
+$t->section('cloud fetchers: azure download flow');
+
+$azureTagBody = (string) json_encode(['values' => [
+    ['name' => 'OtherCloud', 'properties' => ['addressPrefixes' => ['10.99.0.0/16']]],
+    ['name' => 'AzureCloud', 'properties' => ['addressPrefixes' => ['10.5.0.0/16', 5, '2001:db8::/16']]],
+]]);
+$azurePage = "<a id=\"failoverLink\" href=\"https://download.microsoft.com/ServiceTags_Public_{$today}.json\">x</a>";
+$azureOk = new M4ScriptedClient();
+$azureOk->script = [
+    'https://www.microsoft.com/en-us/download/details.aspx?id=56519' => [new HttpResponse(200, $azurePage)],
+    "https://download.microsoft.com/ServiceTags_Public_{$today}.json" => [new HttpResponse(200, $azureTagBody)],
+];
+[$azureNetworks] = CloudFetchers::fetchAzureIpRanges($azureOk);
+$t->same(['10.5.0.0/16', '2001::/16'], array_keys($azureNetworks), 'azure: the cloud tag prefixes are selected and strings filtered');
+
+$azureNoTag = new M4ScriptedClient();
+$azureNoTag->script = [
+    'https://www.microsoft.com/en-us/download/details.aspx?id=56519' => [new HttpResponse(200, $azurePage)],
+    "https://download.microsoft.com/ServiceTags_Public_{$today}.json" => [new HttpResponse(200, (string) json_encode(['values' => []]))],
+];
+$t->same([[], []], CloudFetchers::fetchAzureIpRanges($azureNoTag), 'azure: a document without the cloud tag degrades to empty');
+
+$azureNoUrl = new M4ScriptedClient();
+$azureNoUrl->script['https://www.microsoft.com/en-us/download/details.aspx?id=56519'] = [new HttpResponse(200, '<p>nothing</p>')];
+$t->same([[], []], CloudFetchers::fetchAzureIpRanges($azureNoUrl), 'azure: a page without a download url degrades to empty');
+
+$azureBadPage = new M4ScriptedClient();
+$azureBadPage->script['https://www.microsoft.com/en-us/download/details.aspx?id=56519'] = [new HttpResponse(500, 'down')];
+$t->same([[], []], CloudFetchers::fetchAzureIpRanges($azureBadPage), 'azure: a failed page degrades to empty');
+
+$azureRetry = new M4ScriptedClient();
+$azureRetry->script = [
+    'https://www.microsoft.com/en-us/download/details.aspx?id=56519' => [new HttpResponse(200, $azurePage)],
+    "https://download.microsoft.com/ServiceTags_Public_{$today}.json" => [
+        new CloudHttpException('transient'),
+        new HttpResponse(200, $azureTagBody),
+    ],
+];
+[$azureRetried] = CloudFetchers::fetchAzureIpRanges($azureRetry);
+$t->same(['10.5.0.0/16', '2001::/16'], array_keys($azureRetried), 'azure: a transient download failure is retried');
+
+$azureRedirect = new M4ScriptedClient();
+$azureRedirect->script = [
+    'https://www.microsoft.com/en-us/download/details.aspx?id=56519' => [new HttpResponse(200, $azurePage)],
+    "https://download.microsoft.com/ServiceTags_Public_{$today}.json" => [new HttpResponse(302, '')],
+];
+$t->throws(CloudHttpException::class, static fn () => CloudFetchers::downloadAzureServiceTags($azureRedirect, "https://download.microsoft.com/ServiceTags_Public_{$today}.json", microtime(true) + 20.0), 'azure: a redirecting download is refused');
+
+$azure500 = new M4ScriptedClient();
+$azure500->script = [
+    'https://www.microsoft.com/en-us/download/details.aspx?id=56519' => [new HttpResponse(200, $azurePage)],
+    "https://download.microsoft.com/ServiceTags_Public_{$today}.json" => [new HttpResponse(500, 'down')],
+];
+$t->throws(CloudHttpException::class, static fn () => CloudFetchers::downloadAzureServiceTags($azure500, "https://download.microsoft.com/ServiceTags_Public_{$today}.json", microtime(true) + 20.0), 'azure: a non-success download raises');
+$t->throws(CloudHttpException::class, static fn () => CloudFetchers::downloadAzureServiceTags($azure500, "https://download.microsoft.com/ServiceTags_Public_{$today}.json", microtime(true) - 1.0), 'azure: an elapsed deadline raises without a request');
+
+$t->section('cloud fetchers: csv and json feeds');
+
+$csvClient = new M4StubClient(['https://csv.example/x.csv' => "# header\n\n10.0.0.0/8,US\n  ,US\n junk,US\n192.168.5.0/24,SG\nnot-a-prefix,US\n"]);
+$csvNetworks = CloudFetchers::fetchCsvPrefixNetworks($csvClient, 'https://csv.example/x.csv');
+$t->same(['10.0.0.0/8', '192.168.5.0/24'], array_keys($csvNetworks), 'csv: comments, blanks, and invalid prefixes are skipped');
+$csv500 = new M4ScriptedClient();
+$csv500->script['https://csv.example/x.csv'] = [new HttpResponse(500, 'nope')];
+$t->throws(CloudHttpException::class, static fn () => CloudFetchers::fetchCsvPrefixNetworks($csv500, 'https://csv.example/x.csv'), 'csv: a failed fetch raises');
+
+$doOk = new M4StubClient(['https://www.digitalocean.com/geo/google.csv' => "10.6.0.0/16,US\n"]);
+$t->same([['10.6.0.0/16' => true], []], CloudFetchers::fetchProviderRanges('DigitalOcean', $doOk), 'digitalocean parses its csv feed');
+$doBad = new M4ScriptedClient();
+$doBad->script['https://www.digitalocean.com/geo/google.csv'] = [new HttpResponse(500, 'nope')];
+$t->same([[], []], CloudFetchers::fetchProviderRanges('DigitalOcean', $doBad), 'digitalocean degrades to empty on failure');
+
+$linodeOk = new M4StubClient(['https://geoip.linode.com/' => "172.104.0.0/15,US\n"]);
+$t->same([['172.104.0.0/15' => true], []], CloudFetchers::fetchProviderRanges('Linode', $linodeOk), 'linode parses its csv feed');
+$linodeBad = new M4ScriptedClient();
+$linodeBad->script['https://geoip.linode.com/'] = [new HttpResponse(500, 'nope')];
+$t->same([[], []], CloudFetchers::fetchProviderRanges('Linode', $linodeBad), 'linode degrades to empty on failure');
+
+$vultrBody = (string) json_encode(['subnets' => [['ip_prefix' => '45.63.0.0/16'], ['ip_prefix' => ''], 'junk', ['ip_prefix' => '999.1.2.3/24'], ['other' => 1]]]);
+$vultrOk = new M4StubClient(['https://geofeed.constant.com/?json' => $vultrBody]);
+$t->same([['45.63.0.0/16' => true], []], CloudFetchers::fetchProviderRanges('Vultr', $vultrOk), 'vultr keeps valid subnets and skips junk');
+$vultrBad = new M4ScriptedClient();
+$vultrBad->script['https://geofeed.constant.com/?json'] = [new HttpResponse(500, 'nope')];
+$t->same([[], []], CloudFetchers::fetchProviderRanges('Vultr', $vultrBad), 'vultr degrades to empty on failure');
+
+$t->section('cloud manager: store modes, status, and details');
+
+$scripted = new M4ScriptedClient();
+$scripted->script = [
+    'https://ip-ranges.amazonaws.com/ip-ranges.json' => [new HttpResponse(200, m4AwsBody())],
+    'https://www.gstatic.com/ipranges/cloud.json' => [new HttpResponse(200, m4GcpBody())],
+];
+$manager = new CloudManager($scripted);
+$manager->setStore(null);
+$manager->refresh(['AWS', 'GCP']);
+$t->same(2, count($scripted->requestedUrls), 'refresh without a store fetches straight through');
+$t->same(true, $manager->isCloudIp('10.1.2.3', ['AWS']), 'refresh-installed ranges match');
+$status = $manager->getStatus();
+$t->same(true, $status['AWS']['ready'], 'status reports readiness');
+$t->same(3, $status['AWS']['entries'], 'status reports the entry count');
+$t->ok($status['AWS']['last_refreshed'] !== null, 'status reports the last refresh time');
+$t->same(['AWS', '10.1.0.0/16'], $manager->getCloudProviderDetails('10.1.2.3', ['AWS']), 'details resolve provider and network');
+$t->same(null, $manager->getCloudProviderDetails('not-an-ip', ['AWS']), 'details reject invalid ips');
+
+$withStore = new CloudManager($scripted, new InMemoryCloudIpStore());
+$t->throws(\LogicException::class, static fn () => $withStore->refresh(['AWS']), 'refresh() refuses when a store is attached');
+
+$noClientManager = new CloudManager(null, new InMemoryCloudIpStore());
+$noClientManager->refreshAsync(['AWS']);
+$t->same([], $noClientManager->ipRanges['AWS'], 'a missing client is contained and leaves empty ranges');
+$t->ok(count(array_filter($noClientManager->getStatus(), static fn (array $s): bool => $s['ready'] === false)) > 0, 'status reflects the empty ranges');
+
+$storeBacked = new CloudManager($scripted, new InMemoryCloudIpStore());
+$storeBacked->refreshAsync(['AWS']);
+$callsAfterFirst = $scripted->calls;
+$storeBacked->refreshAsync(['AWS']);
+$t->same($callsAfterFirst, $scripted->calls, 'the store cache short-circuits the second refresh');
+$t->ok($storeBacked->redisHandler() === null, 'redisHandler stays null without redis');
+
+$inMemoryRedis = new CloudManager($scripted, new InMemoryCloudIpStore());
+$fakeConn = new FakeRespConnection();
+$inMemoryRedis->initializeRedis(new RedisHandler(true, 'guard_core_m4b:', connection: $fakeConn));
+$t->ok($inMemoryRedis->redisHandler() !== null, 'initializeRedis swaps the in-memory store for the redis store');
+
+$t->section('curl http client over a local server');
+
+[$httpProc, $httpPort, $httpRouter] = m4StartHttpServer();
+$httpBase = "http://127.0.0.1:{$httpPort}";
+$curl = new CurlHttpClient();
+$okResponse = $curl->get("{$httpBase}/ok");
+$t->same(200, $okResponse->status, 'curl client: 200 observed');
+$t->same('curl-ok-body', $okResponse->body, 'curl client: body carried');
+$t->ok($okResponse->isSuccess(), 'curl client: success predicate');
+$curl->get("{$httpBase}/ok", ['headers' => ['X-Probe' => 'yes'], 'timeout' => 5.0, 'allowRedirects' => true]);
+$t->ok(true, 'curl client: header, timeout, and redirect options accepted');
+$t->same(200, $curl->get("{$httpBase}/redirect", ['allowRedirects' => true])->status, 'curl client: redirects followed when allowed');
+$t->same(302, $curl->get("{$httpBase}/redirect", ['allowRedirects' => false])->status, 'curl client: redirects refused when not allowed');
+$t->throws(CloudHttpException::class, static fn () => $curl->get("{$httpBase}/slow", ['timeout' => 0.2]), 'curl client: timeouts raise the typed error');
+$t->throws(CloudHttpException::class, static fn () => $curl->get('http://127.0.0.1:1/ok'), 'curl client: connection failures raise the typed error');
+$t->same(false, $curl->get("{$httpBase}/server-error")->isSuccess(), 'curl client: 500 is not a success');
+proc_terminate($httpProc);
+proc_close($httpProc);
+@unlink($httpRouter);
+
+$t->section('cloud manager: redis handler refresh paths');
+
+$redisBacked = new CloudManager(new M4StubClient(m4StubBodies()));
+$fakeConn2 = new FakeRespConnection();
+$redisBacked->initializeRedis(new RedisHandler(true, 'guard_core_m4r:', connection: $fakeConn2));
+$redisBacked->setStore(null);
+$redisBacked->refreshAsync(['AWS']);
+$t->same(['10.1.0.0/16', '10.2.0.0/16', '10.3.0.0/16'], array_keys($redisBacked->ipRanges['AWS']), 'the redis handler path fetches and installs ranges');
+$t->ok($fakeConn2->store['guard_core_m4r:cloud_ranges_v2:AWS'] !== null, 'fetched ranges persist under cloud_ranges_v2');
+$redisBacked->ipRanges['AWS'] = [];
+$redisBacked->refreshAsync(['AWS']);
+$t->same(['10.1.0.0/16', '10.2.0.0/16', '10.3.0.0/16'], array_keys($redisBacked->ipRanges['AWS']), 'a cached cloud_ranges_v2 entry hydrates without a fetch');
+
+$failingManager = new CloudManager(new M4ScriptedClient());
+$failingManager->setStore(null);
+$failingManager->refresh(['AWS']);
+$t->same([], $failingManager->ipRanges['AWS'], 'a fetch failure under refresh() is contained');
+
+$emptyRanges = new CloudManager(new M4StubClient(['https://ip-ranges.amazonaws.com/ip-ranges.json' => '{}']));
+$emptyRanges->setStore(null);
+$emptyRanges->refresh(['AWS']);
+$t->same([], $emptyRanges->ipRanges['AWS'], 'an empty fetch installs nothing');
 
 $integration = getenv('REDIS_HOST') !== '0';
 if ($integration) {
