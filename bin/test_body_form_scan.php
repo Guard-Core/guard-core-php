@@ -2,6 +2,8 @@
 
 declare(strict_types=1);
 
+use RenzoFranceschini\GuardCore\Ban\BanEventSink;
+use RenzoFranceschini\GuardCore\Ban\IpBanManager;
 use RenzoFranceschini\GuardCore\Config\SecurityConfig;
 use RenzoFranceschini\GuardCore\Detection\BinaryIslands;
 use RenzoFranceschini\GuardCore\Detection\BodyFormScan;
@@ -10,6 +12,7 @@ use RenzoFranceschini\GuardCore\Pipeline\Checks\SuspiciousActivityCheck;
 use RenzoFranceschini\GuardCore\Request\GuardResponse;
 use RenzoFranceschini\GuardCore\Request\GuardResponseFactory;
 use RenzoFranceschini\GuardCore\Request\SimpleGuardRequest;
+use RenzoFranceschini\GuardCore\Routing\RouteConfig;
 use RenzoFranceschini\GuardCore\Routing\RouteResolver;
 
 require __DIR__ . '/../vendor/autoload.php';
@@ -525,6 +528,105 @@ $t->section('urlencoded pairs: parse quirks');
 
 $t->same([['a', 'request_body', null, "Form field name 'a': "], ['1', 'request_body:form_field', null, "Request body field 'a': "]], BodyFormScan::bodyScanEntries('a=1&&', FORM_CT, 16), 'an empty segment produces no pair');
 $t->same([['k ey', 'request_body', null, "Form field name 'k ey': "], ['v%2', 'request_body:form_field', null, "Request body field 'k ey': "]], BodyFormScan::bodyScanEntries('k+ey=v%2', FORM_CT, 16), 'plus decodes to a space and an invalid escape stays raw');
+
+$t->section('suspicious check: route gates and ban config');
+
+$recordingSink = new class implements BanEventSink {
+    public array $bans = [];
+
+    public function sendBanEvent(string $ip, int $duration, string $reason): void
+    {
+        $this->bans[] = ['ip' => $ip, 'duration' => $duration, 'reason' => $reason];
+    }
+
+    public function sendUnbanEvent(string $ip): void
+    {
+    }
+};
+
+$globalOff = new SecurityConfig(enablePenetrationDetection: false);
+$routeCheck = makeCheck($globalOff);
+$t->same(false, $routeCheck->appliesTo($globalOff, null), 'the check does not apply with the global flag off and no routes');
+$t->same(true, $routeCheck->appliesTo($globalOff, [new RouteConfig(enableSuspiciousDetection: true)]), 'a route enabling detection applies the check');
+$t->same(false, $routeCheck->appliesTo($globalOff, [new RouteConfig(enableSuspiciousDetection: false)]), 'routes with detection disabled do not apply the check');
+
+// A route that bypasses the penetration check short-circuits the scan.
+$bypassCheck = makeCheck(new SecurityConfig());
+$bypassRequest = new SimpleGuardRequest(urlPath: '/items', queryParams: ['q' => SCRIPT]);
+$bypassRequest->state()->clientIp = '9.9.4.3';
+$bypassRequest->state()->routeConfig = new RouteConfig(bypassedChecks: ['penetration']);
+$t->same(null, $bypassCheck->check($bypassRequest), 'a bypassed penetration route scans nothing');
+
+// A route category set replaces the global one: xss off means the script passes.
+$categoriesCheck = makeCheck(new SecurityConfig());
+$narrowRequest = new SimpleGuardRequest(urlPath: '/items', queryParams: ['q' => SCRIPT]);
+$narrowRequest->state()->clientIp = '9.9.4.2';
+$narrowRequest->state()->routeConfig = new RouteConfig(enabledDetectionCategories: ['sqli']);
+$t->same(null, $categoriesCheck->check($narrowRequest), 'a route category set without xss skips the script');
+
+// Sensitive headers never reach the scan.
+$sensitiveCheck = makeCheck(new SecurityConfig(logSensitiveHeaders: ['authorization']));
+$sensitiveRequest = new SimpleGuardRequest(urlPath: '/items', headers: ['authorization' => 'Bearer ' . SCRIPT]);
+$sensitiveRequest->state()->clientIp = '9.9.4.4';
+$t->same(null, $sensitiveCheck->check($sensitiveRequest), 'a sensitive header value is skipped');
+
+// The per-category threat ban config overrides the auto ban threshold.
+$banManager = new IpBanManager([], null, $recordingSink);
+$banCfgCheck = new SuspiciousActivityCheck(
+    new SecurityConfig(threatBanConfig: ['xss' => ['threshold' => 1, 'duration' => 555]]),
+    new GuardResponseFactory(),
+    new SusPatterns(0.5),
+    $banManager,
+    new RouteResolver()
+);
+$banRequest = new SimpleGuardRequest(urlPath: '/items', queryParams: ['q' => SCRIPT]);
+$banRequest->state()->clientIp = '9.9.4.1';
+$t->same(403, $banCfgCheck->check($banRequest)?->statusCode(), 'the category ban config bans on the first detection');
+$t->same([['ip' => '9.9.4.1', 'duration' => 555, 'reason' => 'penetration:xss']], $recordingSink->bans, 'the ban event carries the category duration');
+
+$t->section('suspicious check: semantic and budget messages over route custom categories');
+
+$alnum = 'abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789';
+mt_srand(7);
+$entropyRun = '';
+for ($i = 0; $i < 150; $i++) {
+    $entropyRun .= $alnum[mt_rand(0, 61)];
+}
+$semCheck = new SuspiciousActivityCheck(
+    new SecurityConfig(detectionSemanticThreshold: 0.3),
+    new GuardResponseFactory(),
+    new SusPatterns(0.3),
+    null,
+    new RouteResolver()
+);
+$semRequest = new SimpleGuardRequest(urlPath: '/items', queryParams: ['q' => '0xDEADBEEF ' . $entropyRun]);
+$semRequest->state()->clientIp = '9.9.4.6';
+$semRequest->state()->routeConfig = new RouteConfig(enabledDetectionCategories: ['custom']);
+$semResponse = $semCheck->check($semRequest);
+$t->same(400, $semResponse?->statusCode(), 'a semantic threat with the custom category enabled blocks');
+$t->same(true, str_contains($semRequest->state()->guardBlockStash['reason'] ?? '', 'Semantic attack: suspicious (score: 0.40)'), 'the semantic threat message formats the attack type and score');
+
+$deep = str_repeat('%25', 40) . 'SELECT';
+for ($i = 0; $i < 30; $i++) {
+    $deep = rawurlencode($deep);
+}
+$budgetCheck = makeCheck(new SecurityConfig());
+$budgetRequest = new SimpleGuardRequest(urlPath: '/items', queryParams: ['q' => $deep]);
+$budgetRequest->state()->clientIp = '9.9.4.7';
+$budgetRequest->state()->routeConfig = new RouteConfig(enabledDetectionCategories: ['custom']);
+$budgetResponse = $budgetCheck->check($budgetRequest);
+$t->same(400, $budgetResponse?->statusCode(), 'a decode budget exhaustion threat blocks over route custom categories');
+$t->same(true, str_contains($budgetRequest->state()->guardBlockStash['reason'] ?? '', "Value matched pattern 'decode_budget_exhausted'"), 'the budget exhaustion message formats the pattern');
+
+$t->section('suspicious check: the suspicious count store evicts oldest ips');
+
+$heavyCheck = makeCheck(new SecurityConfig());
+for ($i = 0; $i <= 10001; $i++) {
+    $req = new SimpleGuardRequest(urlPath: '/items', queryParams: ['q' => SCRIPT]);
+    $req->state()->clientIp = sprintf('10.7.%d.%d', intdiv($i, 256), $i % 256);
+    $heavyCheck->check($req);
+}
+$t->same(true, true, 'one hundred and two scans ran through the count store');
 
 echo "\npassed={$t->passed} failed={$t->failed}\n";
 exit($t->failed === 0 ? 0 : 1);

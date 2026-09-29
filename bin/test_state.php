@@ -265,6 +265,47 @@ $t->ok($dMgr->isIpBanned('8.8.8.8'), 'local-only enforcement');
 $ddur = array_values(array_slice($sink->bans, -1))[0]['duration'];
 $t->same(3600, $ddur, 'no-handler ban clamped to 3600 (spec 09)');
 
+$t->section('ban expiry: local entries age out');
+$eMgr = new IpBanManager([], null, $sink);
+$eMgr->ban('9.9.9.1', 1);
+$eMgr->ban('11.0.0.0/8', 1);
+$t->ok($eMgr->isIpBanned('9.9.9.1'), 'fresh short ban enforced');
+$t->ok($eMgr->isIpBanned('11.1.2.3'), 'fresh short cidr enforced');
+usleep(1150000);
+$t->ok(!$eMgr->isIpBanned('9.9.9.1'), 'an expired exact ban is unset and false');
+$t->ok(!$eMgr->isIpBanned('11.1.2.3'), 'an expired network entry drops out of the cache');
+$t->ok(!$eMgr->isIpBanned('totally-not-an-ip'), 'an unparseable ip is never banned');
+
+$t->section('ban input validation');
+$t->throws(fn () => (new IpBanManager([], null, $sink))->ban('999.999.999.999', 600), \InvalidArgumentException::class, 'an invalid exact ip is rejected');
+$t->throws(fn () => (new IpBanManager([], null, $sink))->ban('1.2.3.4/33', 600), \InvalidArgumentException::class, 'a v4 cidr with an out of range prefix is rejected');
+
+$t->section('ban refusal geometry: prefix zero, partial bits, families');
+$privateWarnings = [];
+$pMgr = new IpBanManager([], function (string $m) use (&$privateWarnings) { $privateWarnings[] = $m; }, $sink);
+// /0 target: the hi() bound collapses to all-ones; refused as loopback.
+$t->ok(!$pMgr->ban('8.8.8.8/0', 600), 'a zero prefix target overlaps everything and is refused');
+// /9 target: the partial-byte bound keeps the remaining high bits.
+$t->ok((new IpBanManager(['10.64.0.0/9'], null, $sink))->ban('10.90.0.1/32', 600) === false, 'a partial prefix overlap with a trusted proxy is refused');
+// mixed families never overlap and are allowed.
+$v6Mgr = new IpBanManager(['2001:db8::/32'], null, $sink);
+$t->ok($v6Mgr->ban('8.8.8.8', 600), 'a v4 target does not overlap a v6 trusted proxy');
+$t->ok($v6Mgr->ban('2001:db9::1', 600), 'a v6 target outside the proxy prefix is allowed');
+
+$t->section('private range warnings');
+$t->ok($pMgr->ban('fe80::/10', 600), 'a link local range ban succeeds with a warning');
+$t->ok($pMgr->ban('fd00::/8', 600), 'a unique local range ban succeeds with a warning');
+$t->ok($pMgr->ban('::ffff:10.0.0.5', 600), 'a v4 mapped private address ban succeeds with a warning');
+$t->ok(count(array_filter($privateWarnings, fn ($w) => str_contains($w, 'private IP range'))) === 3, 'each private range ban warned once');
+
+$t->section('local cache overflow eviction');
+$oMgr = new IpBanManager([], null, null);
+for ($i = 0; $i <= 10001; $i++) {
+    $oMgr->ban(sprintf('9.%d.%d.%d', intdiv($i, 65536), intdiv($i, 256) % 256, $i % 256), 600);
+}
+$t->ok(!$oMgr->isIpBanned('9.0.0.0'), 'the first banned ip was evicted');
+$t->ok($oMgr->isIpBanned('9.0.39.17'), 'the newest banned ip survives');
+
 $exit = $t->summary();
 
 $integration = in_array('--integration', $argv, true);

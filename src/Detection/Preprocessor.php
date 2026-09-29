@@ -330,7 +330,10 @@ final class Preprocessor
             $iterations++;
         }
         if ($iterations >= self::MAX_DECODE_ITERATIONS && $content !== $original) {
-            $decodeBudgetExhausted = true;
+            // The budget flag rides the by-ref array the callers pass in
+            // ([false]); writing a bare bool clobbers the array and the
+            // callers' [0] read silently turns into null.
+            $decodeBudgetExhausted[0] = true;
         }
         $content = $this->stripSqlComments($content);
 

@@ -519,4 +519,48 @@ $t->same(null, $response, 'plain request passes');
 $engine->processResponse(behaviorRequest('/'), $factory->createResponse('anything', 200));
 $t->same([], array_filter($logs, static fn (array $l): bool => str_contains($l[1], 'behavioral')), 'no behavior logs without rules');
 
+$t->section('tracker: fail-closed return rules evaluate the body first');
+$deadBodyTracker = new BehaviorTracker(
+    new SecurityConfig(enableRedis: true, redisFailOpen: false, behaviorScanResponseBody: true),
+    $deadRedis,
+    null
+);
+$t->same(false, $deadBodyTracker->trackReturnPattern('GET:/dead', '10.3.0.9', $factory->createResponse('ACCESS DENIED', 200), $returnRuleDead, $now), 'fail-closed return tracking with body scan reports false when redis is down');
+
+$t->section('tracker: local store bounds evict oldest entries');
+$boundsConfig = new SecurityConfig(enableRedis: false, behaviorScanResponseBody: true);
+$boundsTracker = new BehaviorTracker($boundsConfig, null, null);
+for ($i = 0; $i <= 10001; $i++) {
+    $boundsTracker->trackEndpointUsage("GET:/ep/{$i}", '10.4.0.1', $usageRule, $now);
+}
+$t->same(false, $boundsTracker->trackEndpointUsage('GET:/ep/10001', '10.4.0.2', $usageRule, $now), 'the newest endpoint bucket still tracks');
+for ($i = 0; $i <= 10001; $i++) {
+    $boundsTracker->trackEndpointUsage('GET:/bounded', "10.5.{$i}." . ($i % 256), $usageRule, $now);
+}
+$t->same(false, $boundsTracker->trackEndpointUsage('GET:/bounded', '10.5.39.17', $usageRule, $now), 'the newest client still tracks');
+
+$t->section('tracker: response pattern scalar and guard edges');
+$scalarTracker = new BehaviorTracker(new SecurityConfig(enableRedis: false, behaviorScanResponseBody: true), null, null);
+$t->same([false, true], $scalarTracker->checkResponsePattern($factory->createResponse('{"flag": true}', 200), 'json:flag==false'), 'a json boolean compares as its lowercase name');
+$t->same([true, true], $scalarTracker->checkResponsePattern($factory->createResponse('{"flag": true}', 200), 'json:flag==true'), 'a json boolean true matches');
+$t->same([false, true], $scalarTracker->checkResponsePattern($factory->createResponse('{"flag": null}', 200), 'json:flag==missing'), 'a json null renders as the empty string');
+$t->same([false, true], $scalarTracker->checkResponsePattern($factory->createResponse('{"a": 1}', 200), 'json:a'), 'a json pattern without == is a mismatch');
+$t->same(false, $scalarTracker->trackReturnPattern('GET:/x', '10.2.1.9', $factory->createResponse('x', 200), new BehaviorRule('return_pattern', 2, window: 60, pattern: ''), $now), 'a blank pattern rule never counts');
+
+$t->section('tracker: passive applyAction dispatch');
+$passiveLogs = [];
+$passiveCapture = function (string $level, string $message, array $ctx = []) use (&$passiveLogs): void {
+    $passiveLogs[] = [$level, $message, $ctx];
+};
+$passiveTracker = new BehaviorTracker(new SecurityConfig(enableRedis: false, passiveMode: true), null, null, $passiveCapture);
+$passiveTracker->applyAction(new BehaviorRule('usage', 1, action: 'ban'), '10.6.0.1', 'GET:/x', 'details-ban');
+$passiveTracker->applyAction(new BehaviorRule('usage', 1, action: 'alert'), '10.6.0.2', 'GET:/x', 'details-alert');
+$passiveTracker->applyAction(new BehaviorRule('usage', 1, action: 'log'), '10.6.0.3', 'GET:/x', 'details-log');
+$passiveTracker->applyAction(new BehaviorRule('usage', 1, action: 'throttle'), '10.6.0.4', 'GET:/x', 'details-throttle');
+$passiveText = implode("\n", array_map(static fn (array $l): string => $l[1], $passiveLogs));
+$t->ok(str_contains($passiveText, 'Would ban IP 10.6.0.1'), 'passive ban action logs the would-ban line');
+$t->ok(str_contains($passiveText, 'ALERT - Behavioral anomaly: details-alert'), 'passive alert action logs critical');
+$t->ok(str_contains($passiveText, 'Behavioral anomaly detected: details-log'), 'passive log action logs the anomaly');
+$t->ok(str_contains($passiveText, 'Would throttle IP 10.6.0.4'), 'passive throttle action logs the would-throttle line');
+
 exit($t->done('test_behavior'));

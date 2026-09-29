@@ -13,6 +13,7 @@ use RenzoFranceschini\GuardCore\Detection\Base64;
 use RenzoFranceschini\GuardCore\Detection\Matchers;
 use RenzoFranceschini\GuardCore\Detection\Preprocessor;
 use RenzoFranceschini\GuardCore\Detection\Semantic;
+use RenzoFranceschini\GuardCore\Detection\SusPatterns;
 use RenzoFranceschini\GuardCore\GeoIp\MmdbDecoder;
 use RenzoFranceschini\GuardCore\GeoIp\MmdbError;
 use RenzoFranceschini\GuardCore\Ip\CanonicalIp;
@@ -479,6 +480,43 @@ $t->same(false, $dec("\x00\x38"), 'a boolean with size zero is false');
 $t->throws(MmdbError::class, static fn () => $dec("\x00\x28"), 'an unsupported extended type raises an error');
 $t->throws(MmdbError::class, static fn () => $dec("\x00"), 'a truncated extended marker raises an error');
 $t->throws(MmdbError::class, static fn () => $dec("\x20\xff"), 'a pointer past the buffer raises an error');
+
+$t->section('sus patterns: context and validator edges');
+
+$t->same('unknown', SusPatterns::normalizeContext(null), 'a null context normalizes to unknown');
+$t->same('unknown', SusPatterns::normalizeContext('made_up_context'), 'an unknown context name normalizes to unknown');
+$t->same('header', SusPatterns::normalizeContext('header:embedded_json'), 'a context prefix survives normalization');
+
+$braceDetect = new SusPatterns(0.5);
+$braceResult = $braceDetect->detect('{a,b}', '9.9.9.9', 'unknown');
+$t->same(true, $braceResult['is_threat'], 'a brace expansion command reports a threat');
+$t->same('cmd_injection', $braceResult['threats'][0]['category'] ?? '', 'the brace expansion threat is cmd injection');
+
+$alnum = 'abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789';
+mt_srand(7);
+$entropyRun = '';
+for ($i = 0; $i < 150; $i++) {
+    $entropyRun .= $alnum[mt_rand(0, 61)];
+}
+$semanticDetect = new SusPatterns(0.3);
+$semanticResult = $semanticDetect->detect('0xDEADBEEF ' . $entropyRun, '9.9.9.9', 'unknown');
+$t->same(true, $semanticResult['is_threat'], 'a high entropy body with a low semantic threshold is a threat');
+$t->same('semantic', $semanticResult['threats'][0]['type'] ?? '', 'the semantic fallback produces a semantic threat');
+$t->same('suspicious', $semanticResult['threats'][0]['attack_type'] ?? '', 'the semantic fallback attack type is suspicious');
+
+// Deeply nested percent-encoding keeps changing past the decode iteration
+// budget; the exhaustion signal rides back as a custom threat.
+$deep = str_repeat('%25', 40) . 'SELECT';
+for ($i = 0; $i < 30; $i++) {
+    $deep = rawurlencode($deep);
+}
+$budgetDetector = new SusPatterns(0.5);
+$budgetResult = $budgetDetector->detect($deep, '9.9.9.9', 'unknown');
+$t->same(true, in_array('decode_budget_exhausted', array_column($budgetResult['threats'], 'pattern'), true), 'decode budget exhaustion is reported as a threat');
+
+$flagBudget = [false];
+(new Preprocessor())->preprocessWithDecoded($deep, $flagBudget);
+$t->same([true], $flagBudget, 'the decode budget flag stays an array and flips to true');
 
 $total = $t->passed + $t->failed;
 echo "\nPassed: {$t->passed}, Failed: {$t->failed}\n";
