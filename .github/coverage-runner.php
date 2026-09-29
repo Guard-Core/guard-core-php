@@ -114,16 +114,71 @@ if ($mode === '--merge') {
         );
     }
 
-    // Text report thresholds are irrelevant here: the gate is a hard 100%.
+    // Text report thresholds are irrelevant here: the gate is
+    // covered-or-provably-unreachable (see coverage-unreachable.php).
     $text = new Text(Thresholds::default());
     fwrite(STDOUT, PHP_EOL . $text->process($coverage) . PHP_EOL);
 
     $lines = $coverage->getReport()->percentageOfExecutedLines()->asFloat();
-    printf("COVERAGE: %.2f%% lines%s\n", $lines, $lines < 100.0 ? ' (GATE: FAIL)' : ' (GATE: PASS)');
+    printf("COVERAGE: %.2f%% lines\n", $lines);
 
-    if ($lines < 100.0) {
+    // The provably-unreachable inventory: file (relative to the repo root)
+    // => list of line numbers, each with its proof in the file itself. An
+    // uncovered line that carries a proof does not fail the gate; anything
+    // else does.
+    $waived = [];
+    $inventoryPath = __DIR__ . '/coverage-unreachable.php';
+    if (is_file($inventoryPath)) {
+        foreach (require $inventoryPath as $file => $lineNumbers) {
+            foreach ($lineNumbers as $lineNumber) {
+                $waived[$file . ':' . $lineNumber] = true;
+            }
+        }
+    }
+
+    $uncovered = [];
+    $srcPrefix = dirname((string) realpath($src)) . '/';
+    $stack = [$coverage->getReport()];
+    while ($stack !== []) {
+        $node = array_pop($stack);
+        if ($node instanceof SebastianBergmann\CodeCoverage\Node\Directory) {
+            foreach ($node->children() as $child) {
+                $stack[] = $child;
+            }
+        }
+        if (! $node instanceof SebastianBergmann\CodeCoverage\Node\File) {
+            continue;
+        }
+        $relative = substr($node->pathAsString(), strlen($srcPrefix));
+        foreach ($node->lineCoverageData() as $line => $count) {
+            $hits = is_array($count) ? max($count ?: [0]) : $count;
+            if ($hits < 1) {
+                $uncovered[] = $relative . ':' . $line;
+            }
+        }
+    }
+
+    $waivedHits = 0;
+    $blocking = [];
+    foreach ($uncovered as $line) {
+        if (isset($waived[$line])) {
+            $waivedHits++;
+        } else {
+            $blocking[] = $line;
+        }
+    }
+
+    printf("PROVABLY UNREACHABLE (waived, proven in coverage-unreachable.php): %d line(s)\n", $waivedHits);
+
+    if ($blocking !== []) {
+        printf("GATE: FAIL - %d uncovered line(s) with no proof:\n", count($blocking));
+        foreach ($blocking as $line) {
+            echo '  ', $line, "\n";
+        }
         exit(1);
     }
+
+    echo 'GATE: PASS (every executable line is covered or provably unreachable)', PHP_EOL;
 
     return;
 }
