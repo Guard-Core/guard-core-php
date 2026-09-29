@@ -3,3 +3,9 @@ site/
 
 # Internal working notes (kept local, never distributed)
 KNOWN_GAPS.md
+
+# coverage-runner artifact
+coverage.php
+
+# local coverage artifacts
+build/
