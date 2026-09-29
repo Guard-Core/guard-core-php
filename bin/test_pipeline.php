@@ -615,6 +615,13 @@ $sizePassiveRequest->state()->routeConfig = new RouteConfig(maxRequestSize: 10);
 $t->same(null, $byName['request_size_content']->check($sizePassiveRequest), 'an oversized body in passive mode passes with a hook');
 $t->same(true, (bool) array_filter($accessorHook, static fn (string $r): bool => str_contains($r, 'Request size 200 exceeds limit: 10')), 'the oversized body hook fired');
 
+// A disallowed content type in passive mode hooks instead of denying.
+$typePassiveRequest = makeRequest(path: '/type', headers: ['content-type' => 'text/plain']);
+$typePassiveRequest->state()->clientIp = '9.9.9.9';
+$typePassiveRequest->state()->routeConfig = new RouteConfig(allowedContentTypes: ['application/json']);
+$t->same(null, $byName['request_size_content']->check($typePassiveRequest), 'a disallowed content type in passive mode passes with a hook');
+$t->same(true, (bool) array_filter($accessorHook, static fn (string $r): bool => str_contains($r, 'Invalid content type: text/plain')), 'the content type hook fired');
+
 // A route requiring authentication without a header denies with the message.
 $authRequest = makeRequest(path: '/a');
 $authRequest->state()->clientIp = '9.9.9.9';
@@ -657,6 +664,12 @@ $t->same(301, $httpsNotTrusted->check($untrustedRequest)?->statusCode(), 'an unt
 $untrustedRequest->state()->routeConfig = $httpsRoute;
 $httpsNotTrusted2 = new RenzoFranceschini\GuardCore\Pipeline\Checks\HttpsEnforcementCheck(new SecurityConfig(trustXForwardedProto: true, trustedProxies: ['10.0.0.0/8'], passiveMode: true), new GuardResponseFactory());
 $t->same(null, $httpsNotTrusted2->check($untrustedRequest), 'a passive https requirement hooks instead of redirecting');
+
+// A connecting ip outside the trusted proxies is rejected by the proxy
+// membership check before the x-forwarded-proto header is ever read.
+$proxyRequest = new SimpleGuardRequest(urlPath: '/', clientHost: '9.9.9.9', headers: ['x-forwarded-proto' => 'https']);
+$proxyRequest->state()->routeConfig = $httpsRoute;
+$t->same(301, $httpsNotTrusted->check($proxyRequest)?->statusCode(), 'an untrusted connecting ip never upgrades the scheme');
 
 $t->section('pipeline: sensitive query values are redacted from error logs');
 

@@ -12,6 +12,7 @@ declare(strict_types=1);
 use RenzoFranceschini\GuardCore\Detection\Base64;
 use RenzoFranceschini\GuardCore\Detection\BinaryIslands;
 use RenzoFranceschini\GuardCore\Detection\BinaryPrefix;
+use RenzoFranceschini\GuardCore\Detection\HeaderExclusions;
 use RenzoFranceschini\GuardCore\Detection\JsonWalk;
 use RenzoFranceschini\GuardCore\Detection\Matchers;
 use RenzoFranceschini\GuardCore\Detection\Preprocessor;
@@ -22,6 +23,7 @@ use RenzoFranceschini\GuardCore\GeoIp\MmdbDecoder;
 use RenzoFranceschini\GuardCore\GeoIp\MmdbError;
 use RenzoFranceschini\GuardCore\GeoIp\MmdbReader;
 use RenzoFranceschini\GuardCore\Ip\CanonicalIp;
+use RenzoFranceschini\GuardCore\SecurityHeaders\SecurityHeadersPolicy;
 use RenzoFranceschini\GuardCore\Detection\LdapIpv4;
 use RenzoFranceschini\GuardCore\Detection\Pickle;
 use RenzoFranceschini\GuardCore\Detection\Preg;
@@ -787,6 +789,54 @@ $replaced = Preg::replace('(a)|(b)', 'zzb', static fn (array $m): string => ($m[
 $t->same('zz[bee]', $replaced, 'replace flags unparticipating groups with a minus one start');
 
 $t->same(2, Preg::cp("xééy", 3), 'cp converts a byte offset to a code point index');
+
+$t->section('deep decoder, template, truncation, and policy edges');
+
+// extractTokens slices its scan window at MAX_TOKEN_CONTENT_LENGTH (50000):
+// a 120000-char body still yields the capped token stream.
+$cappedTokens = Semantic::extractTokens(str_repeat('alpha ', 20000));
+$t->same(1000, count($cappedTokens), 'extractTokens caps the token window at the token content cap');
+
+// Each structure family contributes at most ten matches; fifty of them
+// across all five families break the structure walk at the aggregate cap.
+$fiftySpecials = str_repeat('<t>', 10) . ' ' . str_repeat('f()', 10) . ' ' . str_repeat(';;', 10) . ' '
+    . str_repeat('../', 10) . ' ' . str_repeat('a://', 10);
+$t->same(80, count(Semantic::extractTokens($fiftySpecials)), 'fifty structural matches break the structure walk at the aggregate cap');
+
+// A second asp region opening inside the first region's closing delimiter
+// overlaps the matched span (region [0,6,8] then [5,9,11]) and is skipped.
+$t->same(1, count(Matchers::templateExpressionMatches('<%7*3<%>x%>', 'system|exec|eval', 'asp')), 'an overlapping asp region inside a matched span is skipped');
+
+// A hex literal that is long enough to be a base64 candidate run (the ten
+// char hex literal is not) is refused inside the private token decoder; the
+// leading multibyte char keeps the sentence from gluing into one token.
+$hexFlagLong = [false];
+$t->same("\u{e9} 0xdeadbeef1234\u{e9}", Base64::decodeCandidates("\u{e9} 0xdeadbeef1234\u{e9}", $hexFlagLong, 65536), 'a candidate-length hex literal is refused inside the token decoder');
+
+// The primary token decodes to non-UTF-8 garbage (sixteen z chars) so the
+// base is null, while the separator-split fragments reassemble into
+// SGVsbG8gd29ybGQ = "Hello world" and ride the reassembly branch.
+$reassembled = Base64::decodeCandidates("\u{e9}" . str_repeat('z', 16) . '.SG.Vs.bG.8g.d2.9y.bG.Q' . "\u{e9}", $hexFlagLong, 65536);
+$t->same("\u{e9}" . str_repeat('z', 16) . '.SG.Vs.bG.8g.d2.9y.bG.Q Hello world' . "\u{e9}", $reassembled, 'a fragment reassembly decodes when the primary token cannot');
+
+// A PUBLIC keyword whose run carries no <!DOCTYPE before it is skipped even
+// when a doctype exists in an earlier run.
+$t->same([], XmlXxe::xmlXxePublicExternalDtdFinditer('<!DOCTYPE a> PUBLIC "http://evil.com/x" >'), 'a public keyword without a doctype in its run never matches');
+
+// One on\w+= match spanning 300003 bytes merges into an attack region larger
+// than the 262144-byte full-scan budget, so the region concatenation path
+// caps the output at the budget.
+$hugeRegion = Truncation::truncateSafely('on' . str_repeat('a', 300000) . '=', new Preprocessor());
+$t->same(262144, strlen($hugeRegion), 'an attack region larger than the scan budget concatenates to the cap');
+$t->same(true, str_starts_with($hugeRegion, 'onaaa'), 'the concatenated attack region keeps the match prefix');
+
+$t->same('', (new Preprocessor())->preprocessSignalPreserving(''), 'an empty content preserves nothing through the signal view');
+$t->same('', (new Preprocessor())->preprocessShortBase64AdditiveView(''), 'an empty content contributes no base64 additive view');
+
+$t->same('[1.2.3.4', HeaderExclusions::stripForwardedEntryPort('[1.2.3.4'), 'an unclosed bracket entry is returned verbatim');
+
+$cspUnsafe = new SecurityHeadersPolicy(['csp' => ['script-src' => ["'unsafe-inline'", "'self'"]]]);
+$t->same(["'unsafe-inline'", "'self'"], $cspUnsafe->csp['script-src'], 'a csp with unsafe sources logs a warning and keeps its directives');
 
 $total = $t->passed + $t->failed;
 echo "\nPassed: {$t->passed}, Failed: {$t->failed}\n";

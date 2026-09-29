@@ -612,6 +612,23 @@ $semResponse = $semCheck->check($semRequest);
 $t->same(400, $semResponse?->statusCode(), 'a semantic threat with the custom category enabled blocks');
 $t->same(true, str_contains($semRequest->state()->guardBlockStash['reason'] ?? '', 'Semantic attack: suspicious (score: 0.40)'), 'the semantic threat message formats the attack type and score');
 
+// A payload whose per-attack probability clears the threshold (six of the
+// eight path keywords plus a ../ structural boost reach 1.0) carries the
+// probability on the threat instead of the fallback threat score.
+$probCheck = new SuspiciousActivityCheck(
+    new SecurityConfig(detectionSemanticThreshold: 0.3),
+    new GuardResponseFactory(),
+    new SusPatterns(0.3),
+    null,
+    new RouteResolver()
+);
+$probRequest = new SimpleGuardRequest(urlPath: '/items', queryParams: ['q' => 'etc passwd shadow hosts proc boot ../ 0xdeadbeef']);
+$probRequest->state()->clientIp = '9.9.4.9';
+$probRequest->state()->routeConfig = new RouteConfig(enabledDetectionCategories: ['custom']);
+$probResponse = $probCheck->check($probRequest);
+$t->same(400, $probResponse?->statusCode(), 'a per-attack probability semantic threat blocks');
+$t->same(true, str_contains($probRequest->state()->guardBlockStash['reason'] ?? '', 'Semantic attack: path (score: 1.00)'), 'the semantic probability message formats the attack probability');
+
 $deep = str_repeat('%25', 40) . 'SELECT';
 for ($i = 0; $i < 30; $i++) {
     $deep = rawurlencode($deep);

@@ -125,12 +125,13 @@ const GEO_BR_IP = '198.51.100.5';
 /**
  * Writes a minimal but spec-valid MMDB database (record size 24, IPv4)
  * mapping the given prefixes to ISO country codes, and returns the path.
- * Only top-level "country" string records are written: the ipinfo
+ * Only top-level "country" string records are written (or records under the
+ * given alternate key, to model foreign record layouts): the ipinfo
  * country_asn.mmdb layout the reference get_country reads.
  *
  * @param array<string, string> $entries
  */
-function buildTestMmdb(array $entries): string
+function buildTestMmdb(array $entries, string $recordKey = 'country'): string
 {
     // Build the binary search tree as nested arrays; a leaf stores its
     // country code under the '!' key.
@@ -151,7 +152,7 @@ function buildTestMmdb(array $entries): string
         unset($node);
     }
 
-    // Data section first: one {"country": code} map per unique code, so
+    // Data section first: one recordKey => code map per unique code, so
     // the leaf records can point at stable offsets.
     $offsets = [];
     $dataSection = '';
@@ -160,7 +161,7 @@ function buildTestMmdb(array $entries): string
             continue;
         }
         $offsets[$code] = strlen($dataSection);
-        $dataSection .= "\xE1" . chr(0x40 | 7) . 'country' . chr(0x40 | strlen($code)) . $code;
+        $dataSection .= "\xE1" . chr(0x40 | strlen($recordKey)) . $recordKey . chr(0x40 | strlen($code)) . $code;
     }
 
     // Wrap the tree into node objects and BFS-index the internal nodes
@@ -430,6 +431,14 @@ $t->same(null, $manager->getCountry('198.51.100.1'), 'outside every fixture pref
 $t->same(null, $manager->getCountry('not-an-ip'), 'unparseable address misses');
 $t->same(null, $manager->getCountry('::1'), 'ipv6 address misses in an ipv4 database');
 $manager->close();
+
+// A valid open database whose record carries a foreign layout (a top-level
+// key other than "country") resolves every lookup as a miss.
+$t->section('mmdb: a record without a country key resolves as a miss');
+$foreignPath = buildTestMmdb(['10.0.0.0/8' => 'US'], 'region');
+$foreignManager = new GeoIpManager($foreignPath);
+$t->same(null, $foreignManager->getCountry('10.1.2.3'), 'a record without a country key is a miss');
+$foreignManager->close();
 
 $t->section('mmdb: missing database fails soft');
 $manager = new GeoIpManager(sys_get_temp_dir() . '/guard-core-php-missing-' . bin2hex(random_bytes(4)) . '.mmdb');
