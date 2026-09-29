@@ -3,6 +3,7 @@
 declare(strict_types=1);
 
 use RenzoFranceschini\GuardCore\Ban\BanEventSink;
+use RenzoFranceschini\GuardCore\Cloud\RedisCloudIpStore;
 use RenzoFranceschini\GuardCore\Ban\IpBanManager;
 use RenzoFranceschini\GuardCore\Ip\CanonicalIp;
 use RenzoFranceschini\GuardCore\Redis\RedisHandler;
@@ -334,6 +335,41 @@ $t->same(0, $enabledHandler->deletePattern('ns:nothing*'), 'deletePattern with n
 $t->same(1, $enabledHandler->incr('ns', 'counter'), 'incr starts at one');
 $t->same(2, $enabledHandler->incr('ns', 'counter'), 'incr accumulates');
 $t->ok($enabledHandler->recordSlidingWindowHit('ns', 'win', microtime(true), microtime(true) - 60, 60) >= 1, 'a sliding window hit records');
+
+$t->section('redis cloud ip store: decode, encode, clear');
+
+$cloudFake = new FakeRespConnection();
+$cloudStore = new RenzoFranceschini\GuardCore\Cloud\RedisCloudIpStore(new RedisHandler(true, 'guard_core_probe:', connection: $cloudFake));
+$cloudFake->seed('guard_core_probe:cloud_ip_v2:AWS', 'not-json');
+$t->same(null, $cloudStore->get('AWS'), 'a malformed payload decodes as null');
+$cloudFake->seed('guard_core_probe:cloud_ip_v2:AWS', '{"a":1}');
+$t->same(null, $cloudStore->get('AWS'), 'a map payload decodes as null');
+$cloudFake->seed('guard_core_probe:cloud_ip_v2:AWS', '[1,2]');
+$t->same(null, $cloudStore->get('AWS'), 'a list of numbers decodes as null');
+$cloudFake->seed('guard_core_probe:cloud_ip_v2:AWS', '["10.0.0.0/8"]');
+$t->same(['10.0.0.0/8'], $cloudStore->get('AWS'), 'a list of strings decodes as ranges');
+$cloudStore->set('GCP', ['10.1.0.0/16', '10.0.0.0/8']);
+$t->same('["10.0.0.0/8", "10.1.0.0/16"]', $cloudFake->store['guard_core_probe:cloud_ip_v2:GCP']['value'] ?? null, 'set sorts and encodes the ranges');
+$t->throws(static fn () => $cloudStore->set('X', [NAN]), RuntimeException::class, 'an unencodable range raises');
+$cloudStore->set('AZ', ['10.4.0.0/16']);
+$cloudStore->clear();
+$t->same(false, isset($cloudFake->store['guard_core_probe:cloud_ip_v2:GCP']), 'clear removes stored providers');
+$t->same(false, isset($cloudFake->store['guard_core_probe:cloud_ip_v2:AZ']), 'clear removes every stored provider');
+
+$memoryStore = new RenzoFranceschini\GuardCore\Cloud\InMemoryCloudIpStore();
+$memoryStore->set('AWS', ['10.0.0.0/8']);
+$memoryStore->clear();
+$t->same(null, $memoryStore->get('AWS'), 'the in memory store clears too');
+
+$t->section('resp pipeline: exec, ttl variants, and delete');
+
+$pipeFake = new FakeRespConnection();
+$respPipe = $pipeFake->pipeline();
+$t->same([], $respPipe->execute(), 'an empty pipeline executes to an empty list');
+$respPipe->set('k', 'v', ex: 60);
+$respPipe->set('k2', 'v2', px: 500);
+$respPipe->del('k', 'k2');
+$t->same(['OK', 'OK', 2], $respPipe->execute(), 'set with ex, px and a multi key del execute');
 
 $t->section('resp connection: scripted stream error paths');
 

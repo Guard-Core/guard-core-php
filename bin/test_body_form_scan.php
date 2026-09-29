@@ -557,6 +557,12 @@ $bypassRequest->state()->clientIp = '9.9.4.3';
 $bypassRequest->state()->routeConfig = new RouteConfig(bypassedChecks: ['penetration']);
 $t->same(null, $bypassCheck->check($bypassRequest), 'a bypassed penetration route scans nothing');
 
+// A route that disables detection suppresses the scan even globally.
+$disabledRequest = new SimpleGuardRequest(urlPath: '/items', queryParams: ['q' => SCRIPT]);
+$disabledRequest->state()->clientIp = '9.9.4.8';
+$disabledRequest->state()->routeConfig = new RouteConfig(enableSuspiciousDetection: false);
+$t->same(null, $bypassCheck->check($disabledRequest), 'a route with detection disabled scans nothing');
+
 // A route category set replaces the global one: xss off means the script passes.
 $categoriesCheck = makeCheck(new SecurityConfig());
 $narrowRequest = new SimpleGuardRequest(urlPath: '/items', queryParams: ['q' => SCRIPT]);

@@ -563,4 +563,40 @@ $t->ok(str_contains($passiveText, 'ALERT - Behavioral anomaly: details-alert'), 
 $t->ok(str_contains($passiveText, 'Behavioral anomaly detected: details-log'), 'passive log action logs the anomaly');
 $t->ok(str_contains($passiveText, 'Would throttle IP 10.6.0.4'), 'passive throttle action logs the would-throttle line');
 
+$t->section('processor: non matching rule types skip');
+
+$skipTracker = new BehaviorTracker(new SecurityConfig(enableRedis: false, behaviorScanResponseBody: true), null, null);
+$skipLogs = [];
+$skipProcessor = new BehavioralProcessor(new SecurityConfig(enableRedis: false), $skipTracker, null, static function (string $level, string $message, array $context) use (&$skipLogs): void {
+    $skipLogs[] = $message;
+});
+$skipRoute = new RouteConfig(behaviorRules: [
+    ['rule_type' => 'return_pattern', 'threshold' => 1, 'pattern' => 'denied', 'action' => 'log'],
+]);
+$skipProcessor->processUsageRules(behaviorRequest('/x'), '10.8.0.1', $skipRoute, microtime(true));
+$t->same([], $skipLogs, 'usage processing skips return pattern rules');
+$usageRoute = new RouteConfig(behaviorRules: [
+    ['rule_type' => 'usage', 'threshold' => 1, 'window' => 60, 'action' => 'log'],
+]);
+$skipProcessor->processReturnRules(behaviorRequest('/x'), $factory->createResponse('denied', 200), '10.8.0.2', $usageRoute, microtime(true));
+$t->same([], $skipLogs, 'return processing skips usage rules');
+$skipProcessor->processGlobalReturnRules(behaviorRequest('/x'), $factory->createResponse('denied', 200), '10.8.0.3', microtime(true));
+$t->same([], $skipLogs, 'global processing skips usage rules');
+
+// log-less processor: a matched rule never crashes without a logger.
+$quietProcessor = new BehavioralProcessor(new SecurityConfig(enableRedis: false), $skipTracker, null);
+$quietRoute = new RouteConfig(behaviorRules: [
+    ['rule_type' => 'usage', 'threshold' => 1, 'window' => 60, 'action' => 'log'],
+]);
+$quietProcessor->processUsageRules(behaviorRequest('/x'), '10.8.1.1', $quietRoute, microtime(true) - 10);
+$quietProcessor->processUsageRules(behaviorRequest('/x'), '10.8.1.1', $quietRoute, microtime(true));
+$t->same(true, true, 'a matched rule without a logger still dispatches');
+
+$t->section('behavior rule: construction edges');
+
+$t->throws(static fn () => new BehaviorRule('usage', 1, window: -5), InvalidArgumentException::class, null, 'a negative window is rejected');
+$t->throws(static fn () => new BehaviorRule('usage', 1, pattern: 3), TypeError::class, null, 'a non string pattern is rejected');
+$t->throws(static fn () => BehaviorRule::fromArray(['rule_type' => 3, 'threshold' => 1]), InvalidArgumentException::class, null, 'a non string rule type in fromArray is rejected');
+$t->throws(static fn () => BehaviorRule::fromArray(['rule_type' => 'usage']), InvalidArgumentException::class, null, 'fromArray without a threshold is rejected');
+
 exit($t->done('test_behavior'));

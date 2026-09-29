@@ -914,7 +914,9 @@ $storeThrowManager = new CloudManager($throwing, new InMemoryCloudIpStore());
 $storeThrowManager->refreshAsync(['AWS']);
 $t->same([], $storeThrowManager->ipRanges['AWS'], 'a store-backed refreshAsync contains transport failures');
 
-// refreshAsync() over a failing redis handler also stays contained.
+// refreshAsync() over a failing redis handler also stays contained: the
+// redis path falls back to the direct fetchers (which succeed), the cache
+// write fails, and the catch keeps the ranges installed.
 $deadConn = new FakeRespConnection();
 $deadConn->failWrites = true;
 $redisDeadManager = new CloudManager(new M4StubClient(m4StubBodies()));
@@ -922,6 +924,25 @@ $redisDeadManager->initializeRedis(new RedisHandler(true, 'guard_core_m4dead:', 
 $redisDeadManager->setStore(null);
 $redisDeadManager->refreshAsync(['AWS']);
 $t->same([], $redisDeadManager->ipRanges['AWS'], 'a failing redis handler path contains the failure');
+
+// With a live fetch blocked as well, the catch installs empty ranges.
+$deadEverywhere = new CloudManager(new M4StubClient([], ['ip-ranges.amazonaws.com']));
+$deadEverywhere->initializeRedis(new RedisHandler(true, 'guard_core_m4dead2:', connection: $deadConn));
+$deadEverywhere->setStore(null);
+$deadEverywhere->refreshAsync(['AWS']);
+$t->same([], $deadEverywhere->ipRanges['AWS'], 'a fully failing redis path installs empty ranges');
+
+// The store path over the same dead handler fails at the cache read.
+$storeDeadManager = new CloudManager(new M4StubClient(m4StubBodies()));
+$storeDeadManager->initializeRedis(new RedisHandler(true, 'guard_core_m4dead3:', connection: $deadConn));
+$storeDeadManager->refreshAsync(['AWS']);
+$t->same([], $storeDeadManager->ipRanges['AWS'], 'a failing store read installs empty ranges');
+
+// refresh() without any client fails at the client requirement.
+$noClientAtAll = new CloudManager(null);
+$noClientAtAll->setStore(null);
+$noClientAtAll->refresh(['AWS']);
+$t->same([], $noClientAtAll->ipRanges['AWS'], 'a missing client under refresh() installs empty ranges');
 
 // Details skip providers that were never installed.
 $t->same(null, $manager->getCloudProviderDetails('10.1.2.3', ['GCP']), 'an uninstalled provider is skipped in details');

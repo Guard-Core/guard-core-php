@@ -10,6 +10,7 @@
 declare(strict_types=1);
 
 use RenzoFranceschini\GuardCore\Detection\Base64;
+use RenzoFranceschini\GuardCore\Detection\BinaryPrefix;
 use RenzoFranceschini\GuardCore\Detection\Matchers;
 use RenzoFranceschini\GuardCore\Detection\Preprocessor;
 use RenzoFranceschini\GuardCore\Detection\Semantic;
@@ -26,6 +27,8 @@ use RenzoFranceschini\GuardCore\Detection\PregFailure;
 use RenzoFranceschini\GuardCore\Detection\Truncation;
 use RenzoFranceschini\GuardCore\Detection\XmlXxe;
 use RenzoFranceschini\GuardCore\Support\CMatch;
+use RenzoFranceschini\GuardCore\Support\Text;
+use RenzoFranceschini\GuardCore\Support\Unicode;
 use RenzoFranceschini\GuardCore\Support\Rx;
 
 require __DIR__ . '/../vendor/autoload.php';
@@ -670,15 +673,53 @@ $t->section('xml: walk continuation guards');
 $t->section('xml: walk continuation guards');
 
 $t->same(0, count(XmlXxe::xmlInternalEntityFinditer('<!DOCTYPE r no brackets here')), 'a doctype without any bracket stops the internal entity walk');
-$t->same(2, count(XmlXxe::xmlInternalEntityFinditer('<!DOCTYPE r [<!ENTITY<!DOCTYPE x [<!ENTITY y>]')), 'an overlapping doctype prefix inside a matched span is skipped once');
+$t->same(1, count(XmlXxe::xmlInternalEntityFinditer('<!DOCTYPE r <!DOCTYPE x [<!ENTITY y>]')), 'an overlapping doctype prefix inside a matched span is skipped once');
 
 $t->same([], XmlXxe::xmlXxePublicExternalDtdFinditer('<!DOCTYPE r PUBLIC "-//X//EN" https://download.example.com/x.dtd>'), 'an unquoted url scheme never completes');
 $t->same([], XmlXxe::xmlXxePublicExternalDtdFinditer('<!DOCTYPE r PUBLIC "-//X//EN" "https://a.com>'), 'a url closed by the tag end never completes');
 $t->same([], XmlXxe::xmlXxePublicExternalDtdFinditer('<!DOCTYPE r PUBLIC "-//X//EN" "https://a.com"'), 'a url without a trailing boundary never completes');
-$t->same(1, count(XmlXxe::xmlXxePublicExternalDtdFinditer('<!DOCTYPE r PUBLIC "-//A//EN" "https://d.example.com/x" PUBLIC "-//B//EN" "https://e.example.com/y">')), 'a second public inside a matched span is skipped');
+$t->same(1, count(XmlXxe::xmlXxePublicExternalDtdFinditer('<!DOCTYPE r PUBLIC "-//A//EN" "https://d.com/x" PUBLIC "-//B//EN" "https://e.example.com/y">')), 'a second public inside a matched span is skipped');
 $t->same([], XmlXxe::xmlXxePublicExternalDtdFinditer('junk PUBLIC "-//A//EN" "https://d.example.com/x">'), 'a public without a doctype in its run never matches');
 $t->same(1, count(XmlXxe::xmlXxePublicExternalDtdFinditer('<!DOCTYPE a PUBLIC "https://valid.example.com/x"> blah <!DOCTYPE b PUBLIC "-//A//EN" oops>')), 'a public whose run carries no quoted url contributes nothing');
 $t->same(1, count(XmlXxe::xmlXxePublicExternalDtdFinditer('<!DOCTYPE r [<!ENTITY c>]><!DOCTYPE s PUBLIC "-//X//EN" "https://download.example.com/x.dtd">')), 'a run boundary scan skips earlier markup');
+
+$t->section('support text and unicode edges');
+
+$t->same(65533, Text::ordAt('x', 5), 'an out of range code point read is the replacement character');
+$t->same(65533, Text::ord("\x80"), 'a bare continuation byte is the replacement character');
+$t->same(65533, Text::ord("\xC3\xFF"), 'a broken two byte sequence is the replacement character');
+$t->same("\u{fffd}", Text::chr(0xD800), 'a surrogate code point renders as the replacement character');
+$t->same(true, Text::isspaceCp(0x20), 'a space code point is whitespace');
+$t->same(true, Text::isspace(' '), 'isspace accepts a space');
+$t->same(false, Text::isspace('x'), 'isspace rejects a letter');
+
+$longRun = Unicode::normalize('e' . str_repeat("\u{0301}", 60));
+$t->same(60, Text::len($longRun), 'a long combining run normalizes and reorders');
+
+$t->section('binary prefix: artifact decoding edges');
+
+$t->same(false, BinaryPrefix::matchIsBinaryDense(null, 0, 5), 'a null prefix never reports density');
+$bpInvalid = BinaryPrefix::build("ok \x80 ok");
+$t->same(1, $bpInvalid[count($bpInvalid) - 1] - $bpInvalid[3], 'a bare continuation byte counts as one artifact');
+$bpOverlong2 = BinaryPrefix::build("ok \xC1\x81 ok");
+$t->same(2, $bpOverlong2[count($bpOverlong2) - 1] - $bpOverlong2[3], 'an invalid lead plus a stray continuation count as two artifacts');
+$bpOverlong3 = BinaryPrefix::build("ok \xE0\x80\x80 ok");
+$t->same(1, $bpOverlong3[count($bpOverlong3) - 1] - $bpOverlong3[3], 'an overlong three byte sequence collapses into one artifact');
+$bpOverlong4 = BinaryPrefix::build("ok \xF0\x80\x80\x80 ok");
+$t->same(1, $bpOverlong4[count($bpOverlong4) - 1] - $bpOverlong4[3], 'an overlong four byte sequence collapses into one artifact');
+
+$t->section('canonical ip: scoped, ranged, and compressed edges');
+
+$t->same('zz%eth0', CanonicalIp::canonicalize('zz%eth0'), 'a scoped address with an invalid part stays verbatim');
+$t->same('1:2:3:4:5:6:7:8', CanonicalIp::canonicalize('1:2:3:4:5:6:7:8'), 'a full ipv6 address keeps its uncompressed form');
+$t->same(false, CanonicalIp::isLoopback('not-an-ip'), 'an unparseable ip is not loopback');
+
+$t->section('semantic and base64 leftovers');
+
+$t->ok(is_array(Semantic::analyze(str_repeat('x', 30000))), 'oversized content analyzes on its capped slice');
+$t->same(null, Base64::decodeShortToken('0xDEADBEEF'), 'a hex literal token never decodes as base64');
+
+$t->section('preg: safeEval, group gaps, and failure surfaces');
 
 $t->section('preg: safeEval, group gaps, and failure surfaces');
 

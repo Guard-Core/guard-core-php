@@ -6,6 +6,7 @@ use RenzoFranceschini\GuardCore\Config\SecurityConfig;
 use RenzoFranceschini\GuardCore\GeoIp\CountryResolver;
 use RenzoFranceschini\GuardCore\Logging\LogActivity;
 use RenzoFranceschini\GuardCore\Logging\LogRedactor;
+use RenzoFranceschini\GuardCore\Logging\LogSanitizer;
 use RenzoFranceschini\GuardCore\Logging\SimpleRequestLogger;
 use RenzoFranceschini\GuardCore\Pipeline\CheckFactory;
 use RenzoFranceschini\GuardCore\Pipeline\Checks\CustomRequestCheck;
@@ -455,6 +456,41 @@ $t->same('"just a string"', LogRedactor::redactBlob('"just a string"'), 'a json 
 $t->same('{"a": "b"}', LogRedactor::redactBlob('{"a": "b"}'), 'an unchanged json blob falls back to the raw text');
 $t->same('http://', LogRedactor::redactUrlForDisplay('http://'), 'an unparseable url returns escaped as-is');
 $t->same('https://h/seg/token=[REDACTED]/y', LogRedactor::redactUrlForDisplay('https://h/seg/token=x/y', ['token']), 'path segments with sensitive assignments redact');
+
+$t->section('security headers policy: validation edges');
+
+$t->throws(static fn () => new SecurityConfig(securityHeaders: ['enabled' => true, 'hsts' => ['enabled' => true, 'max_age' => 'x']]), InvalidArgumentException::class, 'a non int hsts max age is rejected');
+$t->throws(static fn () => new SecurityConfig(securityHeaders: ['enabled' => true, 'csp' => ['default-src' => 'self']]), InvalidArgumentException::class, 'a csp directive with a scalar source is rejected');
+$t->throws(static fn () => new SecurityConfig(securityHeaders: ['enabled' => true, 'csp' => ['default-src' => [3]]]), InvalidArgumentException::class, 'a csp source list with a non string is rejected');
+$t->throws(static fn () => new SecurityConfig(securityHeaders: ['enabled' => true, 'custom' => 'x']), InvalidArgumentException::class, 'a bare custom block is rejected');
+$t->throws(static fn () => new SecurityConfig(securityHeaders: ['enabled' => true, 'custom' => ['X-A' => 3]]), InvalidArgumentException::class, 'a custom header with a non string value is rejected');
+$t->throws(static fn () => new SecurityConfig(securityHeaders: ['enabled' => true, 'frame_options' => 3]), InvalidArgumentException::class, 'a non string override is rejected');
+
+$t->section('log sanitizer: escapes');
+
+$t->same('', LogSanitizer::sanitize(''), 'an empty value sanitizes to empty');
+$t->same('plain', LogSanitizer::sanitize('plain'), 'ascii passes through');
+$t->same('\\n\\r\\t', LogSanitizer::sanitize("\n\r\t"), 'control whitespace escapes');
+$t->same('\\u0000', LogSanitizer::sanitize("\x00"), 'a control byte escapes as unicode');
+$t->same('\\u00e9', LogSanitizer::sanitize("\u{00e9}"), 'latin one escapes as unicode');
+$t->same('\\xff', LogSanitizer::sanitize("\xff"), 'a raw byte escapes as hex');
+$t->same('\\xc3\\xff', LogSanitizer::sanitize("\xc3\xff"), 'an overlong sequence falls back to per byte hex');
+$t->same('\\xf4\\x90\\x80\\x80', LogSanitizer::sanitize("\xf4\x90\x80\x80"), 'an out of range sequence falls back per byte');
+
+$t->section('simple request logger: records');
+
+$records = [];
+$logger = new SimpleRequestLogger(false);
+$prop = new ReflectionProperty(SimpleRequestLogger::class, 'records');
+$prop->setAccessible(true);
+$prop->setValue($logger, [['level' => 'info', 'message' => 'seed', 'context' => []]]);
+$t->same('seed', $logger->records()[0]['message'] ?? null, 'records exposes the log');
+$logger->reset();
+$t->same([], $logger->records(), 'reset empties the records');
+$logger->log('INFO', 'hello', ['a' => 1]);
+$t->same('info', $logger->records()[0]['level'] ?? null, 'log lowercases the level');
+
+$total = $t->passed + $t->failed;
 
 $total = $t->passed + $t->failed;
 

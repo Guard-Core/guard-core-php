@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 use RenzoFranceschini\GuardCore\Ban\IpBanManager;
 use RenzoFranceschini\GuardCore\Config\SecurityConfig;
+use RenzoFranceschini\GuardCore\Engine\GuardEngine;
 use RenzoFranceschini\GuardCore\Pipeline\CheckFactory;
 use RenzoFranceschini\GuardCore\Pipeline\SecurityCheckPipeline;
 use RenzoFranceschini\GuardCore\RateLimit\RateLimitConfig;
@@ -49,6 +50,13 @@ function integrationRequest(string $path, string $ip, array $query = []): Simple
 
 function runPipelineIntegration(T $t): void
 {
+    $t->section('integration: engine initialize wires redis through');
+    $initEngine = new GuardEngine(new SecurityConfig(enableRedis: true));
+    $initEngine->initialize();
+    $initEngine->banManager()->ban('9.7.6.5', 600);
+    $t->same(true, $initEngine->redis()->exists('banned_ips', '9.7.6.5'), 'the initialized engine writes bans through redis');
+    $initEngine->banManager()->unban('9.7.6.5');
+
     $t->section('integration: banned IP blocked through pipeline');
 
     [$redis, $bans, $handler, $pipeline] = makeIntegrationStack();

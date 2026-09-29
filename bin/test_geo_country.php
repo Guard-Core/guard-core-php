@@ -590,6 +590,18 @@ $passiveRequest->state()->clientIp = '203.0.113.70';
 $t->same(null, $passiveHookCheck->check($passiveRequest), 'a banned ip in passive mode returns null');
 $t->ok($hookPayload !== null && str_contains($hookPayload['reason'] ?? '', 'Banned IP attempted access'), 'the passive banned hook fires with the ban reason');
 
+// Passive mode: a route blacklist hit fires the hook inline and returns null.
+$hookPayload = null;
+$passiveRouteConfig = new SecurityConfig(enableRedis: false, passiveMode: true, onBlock: static function ($request, $payload) use (&$hookPayload): void {
+    $hookPayload = $payload;
+});
+$passiveRouteCheck = new IpSecurityCheck($passiveRouteConfig, new GuardResponseFactory(), null, new RouteResolver(), $resolver);
+$passiveRouteRequest = new SimpleGuardRequest(urlPath: '/', clientHost: '203.0.113.80');
+$passiveRouteRequest->state()->clientIp = '203.0.113.80';
+$passiveRouteRequest->state()->routeConfig = new RouteConfig(ipBlacklist: ['203.0.113.0/24']);
+$t->same(null, $passiveRouteCheck->check($passiveRouteRequest), 'a route blacklist hit in passive mode returns null');
+$t->ok(str_contains($hookPayload['reason'] ?? '', 'IP not allowed by route config'), 'the passive route deny hook fired');
+
 // A request without a client ip never scans.
 $noIpCheck = new IpSecurityCheck(new SecurityConfig(enableRedis: false), new GuardResponseFactory(), null, new RouteResolver(), $resolver);
 $noIpRequest = new SimpleGuardRequest(urlPath: '/');

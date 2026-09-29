@@ -537,6 +537,88 @@ $t->throws(RuntimeException::class, static function (): void {
     $strictPipeline->execute(makeRequest());
 }, 'a rebuild failure with no checks rethrows');
 
+$t->section('pipeline: check surface accessors and passive hooks');
+
+$accessorConfig = new SecurityConfig(passiveMode: true);
+$accessorHook = [];
+$accessorConfig = $accessorConfig->with(['on_block' => static function ($request, $payload) use (&$accessorHook): void {
+    $accessorHook[] = $payload['reason'] ?? '?';
+}]);
+$accessorFactory = new CheckFactory(new GuardResponseFactory(), new RouteResolver(), new IpBanManager(), new RateLimitHandler(new RateLimitConfig()));
+$accessorPipeline = new SecurityCheckPipeline($accessorFactory->buildChecks($accessorConfig), $accessorConfig);
+$byName = [];
+foreach ($accessorPipeline->checks() as $check) {
+    $byName[$check->checkName()] = $check;
+}
+$t->same(['block_cloud_providers'], $byName['cloud_ip_refresh']->containerFields(), 'cloud_ip_refresh reports its container fields');
+$t->same(['block_cloud_providers'], $byName['cloud_provider']->containerFields(), 'cloud_provider reports its container fields');
+$t->same(['endpoint_rate_limits'], $byName['rate_limit']->containerFields(), 'rate_limit reports its container fields');
+$t->same(['blocked_user_agents'], $byName['user_agent']->containerFields(), 'user_agent reports its container fields');
+$t->same([], $byName['referrer']->containerFields(), 'a stateless check reports no container fields');
+
+// HeaderBag::remove drops headers case-insensitively.
+$headers = new RenzoFranceschini\GuardCore\Request\HeaderBag();
+$headers->set('X-A', '1');
+$headers->remove('x-a');
+$t->same(null, $headers->get('X-A'), 'remove drops a header case-insensitively');
+
+// A disabled cors policy answers with no headers; an enabled one composes
+// the full surface for an allowed origin.
+$t->same(null, RenzoFranceschini\GuardCore\Cors\CorsPolicy::forConfig(new SecurityConfig()), 'a disabled cors config builds no policy');
+$disabledPolicy = new RenzoFranceschini\GuardCore\Cors\CorsPolicy(false, [], [], [], false, 0, []);
+$t->same([], $disabledPolicy->buildResponseHeaders(new RenzoFranceschini\GuardCore\Request\HeaderBag()), 'a disabled cors policy answers with no headers');
+$corsConfig = new SecurityConfig(enableCors: true, corsAllowOrigins: ['https://ok.example'], corsAllowCredentials: true, corsExposeHeaders: ['X-Extra']);
+$corsOk = RenzoFranceschini\GuardCore\Cors\CorsPolicy::forConfig($corsConfig);
+$corsHeaders = new RenzoFranceschini\GuardCore\Request\HeaderBag();
+$corsHeaders->set('Origin', 'https://ok.example');
+$built = $corsOk->buildResponseHeaders($corsHeaders);
+$t->same('true', $built['Access-Control-Allow-Credentials'] ?? null, 'an allowed credentialed origin carries the credentials header');
+$t->same('X-Extra', $built['Access-Control-Expose-Headers'] ?? null, 'the expose headers surface is composed');
+
+// DeferredCheck accessors.
+$deferred = new DeferredCheck('emergency_mode', $accessorConfig, new GuardResponseFactory(), null);
+$t->same('emergency_mode', $deferred->checkName(), 'a deferred check reports its name');
+$t->same(false, $deferred->appliesTo($accessorConfig, null), 'a deferred check without a gate never applies');
+$gated = new DeferredCheck('rate_limit', $accessorConfig, new GuardResponseFactory(), static fn (): bool => true);
+$t->same(true, $gated->appliesTo($accessorConfig, null), 'a deferred check gate decides the application');
+
+// A closed time window in passive mode fires the hook and passes.
+$twRequest = makeRequest(path: '/late');
+$twRequest->state()->clientIp = '9.9.9.9';
+$twRequest->state()->routeConfig = new RouteConfig(timeRestrictions: ['start' => '23:59', 'end' => '00:00']);
+$t->same(null, $byName['time_window']->check($twRequest), 'a closed time window in passive mode passes with a hook');
+$t->same(true, in_array('Access outside allowed time window', $accessorHook, true), 'the closed window hook fired');
+
+// A missing referrer and a disallowed referrer both hook in passive mode.
+$refRequest = makeRequest(path: '/r');
+$refRequest->state()->clientIp = '9.9.9.9';
+$refRequest->state()->routeConfig = new RouteConfig(requireReferrer: ['good.example']);
+$t->same(null, $byName['referrer']->check($refRequest), 'a missing referrer in passive mode passes with a hook');
+$refRequest2 = makeRequest(path: '/r', headers: ['referer' => 'https://evil.example/x']);
+$refRequest2->state()->clientIp = '9.9.9.9';
+$refRequest2->state()->routeConfig = new RouteConfig(requireReferrer: ['good.example']);
+$t->same(null, $byName['referrer']->check($refRequest2), 'a disallowed referrer in passive mode passes with a hook');
+$t->same(true, in_array('Missing referrer header', $accessorHook, true), 'the missing referrer hook fired');
+$t->same(true, (bool) array_filter($accessorHook, static fn (string $r): bool => str_starts_with($r, 'Invalid referrer:')), 'the invalid referrer hook fired');
+
+// A route requiring authentication without a header denies with the message.
+$authRequest = makeRequest(path: '/a');
+$authRequest->state()->clientIp = '9.9.9.9';
+$authRequest->state()->routeConfig = new RouteConfig(authRequired: 'x-api-key');
+$authResponse = $byName['authentication']->check($authRequest);
+$t->same(null, $authResponse, 'a missing custom auth header passes with a passive hook');
+$t->same(true, (bool) array_filter($accessorHook, static fn (string $r): bool => str_contains($r, 'Missing x-api-key authentication')), 'the missing auth hook fired');
+
+// An invalid content-length header is rejected.
+$sizeRequest = makeRequest(path: '/s', headers: ['content-length' => 'abc']);
+$sizeRequest->state()->routeConfig = new RouteConfig(maxRequestSize: 1024);
+$sizeRequest->state()->clientIp = '9.9.9.9';
+$t->throws(InvalidArgumentException::class, static fn () => $byName['request_size_content']->check($sizeRequest), 'an invalid content length is rejected');
+
+$t->section('pipeline: sensitive query values are redacted from error logs');
+
+$t->section('pipeline: sensitive query values are redacted from error logs');
+
 $t->section('pipeline: sensitive query values are redacted from error logs');
 
 $redactLogs = [];
