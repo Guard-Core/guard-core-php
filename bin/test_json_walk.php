@@ -269,5 +269,35 @@ $t->same(false, in_array('Note', $values, true), 'keys compare lowercased agains
 $entries = JsonWalk::walkEntries(JsonWalk::parse('{"note": "x"}'), 'request_body', ['Note' => true]);
 $t->same(2, count($entries), 'entries never lowercase against the exclusion set');
 
+$t->section('json walk: depth cap and compact serialization');
+
+// An object nested past the depth cap serializes as one compact entry.
+$deep = '';
+for ($i = 0; $i < 40; $i++) {
+    $deep .= '{"n":';
+}
+$deep .= '"bottom"';
+$deep .= str_repeat('}', 40);
+$deepEntries = JsonWalk::walkEntries(JsonWalk::parse($deep), 'request_body');
+$capped = array_values(array_filter(
+    $deepEntries,
+    static fn (array $e): bool => str_starts_with($e[0], '{"n":') && str_contains($e[0], '"bottom"')
+));
+$t->same(1, count($capped), 'a deep chain walks until the cap and serializes the rest compactly');
+
+$t->same('{}', JsonWalk::serializeCompact(json_decode('{}')), 'an empty object serializes to braces');
+$t->same('[]', JsonWalk::serializeCompact([]), 'an empty array serializes to brackets');
+$t->same('true', JsonWalk::serializeCompact(true), 'a boolean serializes lowercase');
+$t->same('false', JsonWalk::serializeCompact(false), 'false serializes lowercase');
+$t->same('null', JsonWalk::serializeCompact(null), 'null serializes bare');
+$t->same('1.5', JsonWalk::serializeCompact(1.5), 'a float serializes shortest round-trip');
+$t->same('"a\\nb"', JsonWalk::serializeCompact("a\nb"), 'a newline escapes');
+$t->same('"a\\rb"', JsonWalk::serializeCompact("a\rb"), 'a carriage return escapes');
+$t->same('"a\\tb"', JsonWalk::serializeCompact("a\tb"), 'a tab escapes');
+$t->same('"a\\bb"', JsonWalk::serializeCompact("a\x08b"), 'a backspace escapes');
+$t->same('"a\\fb"', JsonWalk::serializeCompact("a\x0cb"), 'a form feed escapes');
+$t->same('"a\\u0001b"', JsonWalk::serializeCompact("a\x01b"), 'other controls escape as unicode');
+$t->same('"a\'\\"b"', JsonWalk::serializeCompact("a'\"b"), 'quotes and backslashes escape');
+
 echo "\npassed={$t->passed} failed={$t->failed}\n";
 exit($t->failed === 0 ? 0 : 1);

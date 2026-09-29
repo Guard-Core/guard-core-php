@@ -306,6 +306,35 @@ for ($i = 0; $i <= 10001; $i++) {
 $t->ok(!$oMgr->isIpBanned('9.0.0.0'), 'the first banned ip was evicted');
 $t->ok($oMgr->isIpBanned('9.0.39.17'), 'the newest banned ip survives');
 
+$t->section('redis handler: disabled and enabled surfaces');
+
+$disabledHandler = new RedisHandler(false, 'guard_core_test:');
+$disabledHandler->initialize();
+$t->ok(!$disabledHandler->isInitialized(), 'a disabled handler never initializes');
+$t->same(false, $disabledHandler->setKey('ns', 'k', 'v'), 'setKey on a disabled handler is false');
+$t->same(null, $disabledHandler->exists('ns', 'k'), 'exists on a disabled handler is null');
+$t->same(0, $disabledHandler->delete('ns', 'k'), 'delete on a disabled handler is zero');
+$t->same([], $disabledHandler->keys('ns:*'), 'keys on a disabled handler is empty');
+$t->same(0, $disabledHandler->deletePattern('ns:*'), 'deletePattern on a disabled handler is zero');
+$t->same(0, $disabledHandler->incr('ns', 'k'), 'incr on a disabled handler is zero');
+$t->same(0, $disabledHandler->recordSlidingWindowHit('ns', 'k', microtime(true), microtime(true) - 60, 60), 'sliding window on a disabled handler is zero');
+$t->same(null, $disabledHandler->getKey('ns', 'k'), 'getKey on a disabled handler is null');
+
+$fakeRedis = new FakeRespConnection();
+$enabledHandler = new RedisHandler(true, 'guard_core_test:', connection: $fakeRedis);
+$enabledHandler->initialize();
+$t->ok($enabledHandler->isInitialized(), 'an enabled handler initializes');
+$t->same(true, $enabledHandler->setKey('ns', 'k', 'v'), 'setKey round-trips');
+$t->same(true, $enabledHandler->exists('ns', 'k'), 'exists reports the stored key');
+$t->same(false, $enabledHandler->exists('ns', 'missing'), 'exists reports misses');
+$t->same(1, $enabledHandler->delete('ns', 'k'), 'delete removes the key');
+$t->same(true, $enabledHandler->setKey('ns', 'gone', 'v'), 'seed a key for the pattern delete');
+$t->same(1, $enabledHandler->deletePattern('ns:gone*'), 'deletePattern removes matching keys');
+$t->same(0, $enabledHandler->deletePattern('ns:nothing*'), 'deletePattern with no matches is zero');
+$t->same(1, $enabledHandler->incr('ns', 'counter'), 'incr starts at one');
+$t->same(2, $enabledHandler->incr('ns', 'counter'), 'incr accumulates');
+$t->ok($enabledHandler->recordSlidingWindowHit('ns', 'win', microtime(true), microtime(true) - 60, 60) >= 1, 'a sliding window hit records');
+
 $t->section('resp connection: scripted stream error paths');
 
 /**

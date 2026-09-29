@@ -448,6 +448,16 @@ $t->same(true, str_contains($portUrl, ':8443'), 'ports survive redaction');
 $t->same(true, str_contains($portUrl, '#frag'), 'fragments survive redaction');
 $t->same(true, LogRedactor::sensitiveNames(['extra_param'], ['extra_body'], ['Extra_Header']) !== [], 'sensitive names merge extras');
 
+$t->section('redaction: blob and url edge surfaces');
+
+$t->same('', LogRedactor::redactBlob(''), 'an empty blob stays empty');
+$t->same('"just a string"', LogRedactor::redactBlob('"just a string"'), 'a json scalar blob is not treated as a map');
+$t->same('{"a": "b"}', LogRedactor::redactBlob('{"a": "b"}'), 'an unchanged json blob falls back to the raw text');
+$t->same('http://', LogRedactor::redactUrlForDisplay('http://'), 'an unparseable url returns escaped as-is');
+$t->same('https://h/seg/token=[REDACTED]/y', LogRedactor::redactUrlForDisplay('https://h/seg/token=x/y', ['token']), 'path segments with sensitive assignments redact');
+
+$total = $t->passed + $t->failed;
+
 $total = $t->passed + $t->failed;
 
 echo "\nPassed: {$t->passed}, Failed: {$t->failed}\n";

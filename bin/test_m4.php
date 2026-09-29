@@ -894,6 +894,38 @@ $emptyRanges->setStore(null);
 $emptyRanges->refresh(['AWS']);
 $t->same([], $emptyRanges->ipRanges['AWS'], 'an empty fetch installs nothing');
 
+$t->section('cloud manager: fetch failure containment across all three paths');
+
+// refresh() with a throwing transport logs and installs empty ranges.
+$throwing = new M4StubClient([], ['ip-ranges.amazonaws.com']);
+$throwManager = new CloudManager($throwing);
+$throwManager->setStore(null);
+$throwManager->refresh(['AWS']);
+$t->same([], $throwManager->ipRanges['AWS'], 'a transport failure under refresh() installs empty ranges');
+
+// refreshAsync() without a redis handler falls back to the direct fetchers.
+$fallbackManager = new CloudManager($throwing);
+$fallbackManager->setStore(null);
+$fallbackManager->refreshAsync(['AWS']);
+$t->same([], $fallbackManager->ipRanges['AWS'], 'refreshAsync without redis still fetches (and contains failures)');
+
+// refreshAsync() with a store absorbs the failure and keeps the range hole.
+$storeThrowManager = new CloudManager($throwing, new InMemoryCloudIpStore());
+$storeThrowManager->refreshAsync(['AWS']);
+$t->same([], $storeThrowManager->ipRanges['AWS'], 'a store-backed refreshAsync contains transport failures');
+
+// refreshAsync() over a failing redis handler also stays contained.
+$deadConn = new FakeRespConnection();
+$deadConn->failWrites = true;
+$redisDeadManager = new CloudManager(new M4StubClient(m4StubBodies()));
+$redisDeadManager->initializeRedis(new RedisHandler(true, 'guard_core_m4dead:', connection: $deadConn));
+$redisDeadManager->setStore(null);
+$redisDeadManager->refreshAsync(['AWS']);
+$t->same([], $redisDeadManager->ipRanges['AWS'], 'a failing redis handler path contains the failure');
+
+// Details skip providers that were never installed.
+$t->same(null, $manager->getCloudProviderDetails('10.1.2.3', ['GCP']), 'an uninstalled provider is skipped in details');
+
 $integration = getenv('REDIS_HOST') !== '0';
 if ($integration) {
     $host = getenv('REDIS_HOST') ?: '127.0.0.1';

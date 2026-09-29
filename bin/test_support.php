@@ -482,6 +482,26 @@ $t->throws(MmdbError::class, static fn () => $dec("\x00\x28"), 'an unsupported e
 $t->throws(MmdbError::class, static fn () => $dec("\x00"), 'a truncated extended marker raises an error');
 $t->throws(MmdbError::class, static fn () => $dec("\x20\xff"), 'a pointer past the buffer raises an error');
 
+$t->section('preprocessor: overlong utf-8 and ref edges');
+
+$pp = new Preprocessor();
+// A 3-byte overlong encoding of "/" decodes leniently, with ascii mixed in.
+$t->same('A/B', $pp->lenientOverlongUtf8Decode("A\xE0\x80\xAFB"), 'an overlong three byte sequence decodes to its code point');
+// A broken continuation aborts the sequence decode.
+$t->same('', $pp->lenientOverlongUtf8Decode("\xE0\x80\xC0"), 'a bad third byte aborts the overlong decode');
+$t->same("\x00", $pp->lenientOverlongUtf8Decode("\xE0\xC0\xAF"), 'a bad second byte aborts the overlong decode');
+// Truncated multi byte sequences are dropped byte by byte.
+$t->same('a b', $pp->urlDecode("a%FF b"), 'invalid percent bytes drop in the lenient url decode');
+// A bare '&#;' keeps its text.
+$t->same('&#;', $pp->htmlUnescape('&#;'), 'an empty numeric reference stays literal');
+// A partial known entity keeps its decoded prefix plus the tail.
+$t->same('<script', $pp->htmlUnescape('&ltscript'), 'a semi-colon less known entity decodes with its tail');
+
+// The newline-preserving url-decoded view.
+$flag = [false];
+$t->same('', $pp->preprocessUrlDecodedNewlinePreserving('', $flag), 'the newline preserving view maps empty to empty');
+$t->same('SELECT 1', $pp->preprocessUrlDecodedNewlinePreserving('SELECT%201', $flag), 'the newline preserving view decodes percent escapes');
+
 $t->section('sus patterns: context and validator edges');
 
 $t->same('unknown', SusPatterns::normalizeContext(null), 'a null context normalizes to unknown');
@@ -518,6 +538,21 @@ $t->same(true, in_array('decode_budget_exhausted', array_column($budgetResult['t
 $flagBudget = [false];
 (new Preprocessor())->preprocessWithDecoded($deep, $flagBudget);
 $t->same([true], $flagBudget, 'the decode budget flag stays an array and flips to true');
+
+$t->section('xml: walk continuation guards');
+
+$t->same(0, count(XmlXxe::xmlInternalEntityFinditer('<!DOCTYPE r no brackets here')), 'a doctype without any bracket stops the internal entity walk');
+$t->same(2, count(XmlXxe::xmlInternalEntityFinditer('<!DOCTYPE r [<!ENTITY<!DOCTYPE x [<!ENTITY y>]')), 'an overlapping doctype prefix inside a matched span is skipped once');
+
+$t->same([], XmlXxe::xmlXxePublicExternalDtdFinditer('<!DOCTYPE r PUBLIC "-//X//EN" https://download.example.com/x.dtd>'), 'an unquoted url scheme never completes');
+$t->same([], XmlXxe::xmlXxePublicExternalDtdFinditer('<!DOCTYPE r PUBLIC "-//X//EN" "https://a.com>'), 'a url closed by the tag end never completes');
+$t->same([], XmlXxe::xmlXxePublicExternalDtdFinditer('<!DOCTYPE r PUBLIC "-//X//EN" "https://a.com"'), 'a url without a trailing boundary never completes');
+$t->same(1, count(XmlXxe::xmlXxePublicExternalDtdFinditer('<!DOCTYPE r PUBLIC "-//A//EN" "https://d.example.com/x" PUBLIC "-//B//EN" "https://e.example.com/y">')), 'a second public inside a matched span is skipped');
+$t->same([], XmlXxe::xmlXxePublicExternalDtdFinditer('junk PUBLIC "-//A//EN" "https://d.example.com/x">'), 'a public without a doctype in its run never matches');
+$t->same(1, count(XmlXxe::xmlXxePublicExternalDtdFinditer('<!DOCTYPE a PUBLIC "https://valid.example.com/x"> blah <!DOCTYPE b PUBLIC "-//A//EN" oops>')), 'a public whose run carries no quoted url contributes nothing');
+$t->same(1, count(XmlXxe::xmlXxePublicExternalDtdFinditer('<!DOCTYPE r [<!ENTITY c>]><!DOCTYPE s PUBLIC "-//X//EN" "https://download.example.com/x.dtd">')), 'a run boundary scan skips earlier markup');
+
+$t->section('preg: safeEval, group gaps, and failure surfaces');
 
 $t->section('preg: safeEval, group gaps, and failure surfaces');
 
