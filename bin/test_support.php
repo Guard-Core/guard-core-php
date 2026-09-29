@@ -13,9 +13,11 @@ use RenzoFranceschini\GuardCore\Detection\Base64;
 use RenzoFranceschini\GuardCore\Detection\Matchers;
 use RenzoFranceschini\GuardCore\Detection\Preprocessor;
 use RenzoFranceschini\GuardCore\Detection\Semantic;
+use RenzoFranceschini\GuardCore\Detection\ShellValidators;
 use RenzoFranceschini\GuardCore\Detection\SusPatterns;
 use RenzoFranceschini\GuardCore\GeoIp\MmdbDecoder;
 use RenzoFranceschini\GuardCore\GeoIp\MmdbError;
+use RenzoFranceschini\GuardCore\GeoIp\MmdbReader;
 use RenzoFranceschini\GuardCore\Ip\CanonicalIp;
 use RenzoFranceschini\GuardCore\Detection\LdapIpv4;
 use RenzoFranceschini\GuardCore\Detection\Pickle;
@@ -71,6 +73,17 @@ final class T
     {
         echo "\n=== {$name} ===\n";
     }
+}
+
+/**
+ * Writes fixture bytes to a temp file for MmdbReader construction.
+ */
+function mmdbTempFile(string $content): string
+{
+    $path = tempnam(sys_get_temp_dir(), 'mmdbbad');
+    file_put_contents($path, $content);
+
+    return $path;
 }
 
 $t = new T();
@@ -502,6 +515,103 @@ $flag = [false];
 $t->same('', $pp->preprocessUrlDecodedNewlinePreserving('', $flag), 'the newline preserving view maps empty to empty');
 $t->same('SELECT 1', $pp->preprocessUrlDecodedNewlinePreserving('SELECT%201', $flag), 'the newline preserving view decodes percent escapes');
 
+$t->section('mmdb reader: fixture tree sizes and error paths');
+
+/**
+ * Builds a minimal MMDB file the reader accepts: one search node whose
+ * records the given 24/28/32-bit encoding lays out, a country map in the
+ * data section, and the metadata block the marker terminates.
+ *
+ * @param array{0: int, 1: int}|null $records left/right record values for node 0
+ */
+function mmdbFixture(int $recordSize, ?array $records, int $ipVersion = 4, ?int $claimNodeCount = null, string $separator = ''): string
+{
+    $recBytes = intdiv($recordSize, 8);
+    $records = $records ?? [0, 0];
+    $tree = str_repeat("\x00", count($records) * $recBytes * 2);
+    $pack = static function (int $v) use ($recordSize, $recBytes): string {
+        if ($recordSize === 32) {
+            return pack('N', $v);
+        }
+        if ($recordSize === 28) {
+            // The reader decodes a 28-bit record from four bytes: the three
+            // slot bytes plus the next byte, so the slot holds the first
+            // three and the separator carries the low byte.
+            return substr(chr(($v >> 24) << 4) . chr(($v >> 16) & 0xFF) . chr(($v >> 8) & 0xFF), 0, 3);
+        }
+        if ($recordSize === 16) {
+            return substr(pack('N', $v), 2, 2);
+        }
+
+        return substr(pack('N', $v), 1, 3);
+    };
+    foreach (array_values($records) as $slot => $value) {
+        if (is_string($value)) {
+            $tree = substr_replace($tree, $value, $slot * $recBytes, strlen($value));
+            continue;
+        }
+        $tree = substr_replace($tree, $pack($value), $slot * $recBytes, $recBytes);
+    }
+    $nodeCount = $claimNodeCount ?? count($records);
+    $data = "\xE1\x47country\x42US";
+    $meta = "\xE3"
+        . "\x4A" . 'node_count' . ($nodeCount < 256 ? "\xA1" . chr($nodeCount) : "\xA2" . pack('n', $nodeCount))
+        . "\x4B" . 'record_size' . "\xA1" . chr($recordSize)
+        . "\x4A" . 'ip_version' . "\xA1" . chr($ipVersion);
+
+    return $tree . $separator . $data . "\xAB\xCD\xEFMaxMind.com" . $meta;
+}
+
+function mmdbLookup(string $content, string $ip): ?array
+{
+    $path = tempnam(sys_get_temp_dir(), 'mmdbfix');
+    file_put_contents($path, $content);
+    try {
+        return (new MmdbReader($path))->lookup($ip);
+    } finally {
+        @unlink($path);
+    }
+}
+
+// 24-bit tree: left record equals the node count (a miss), right points at data.
+$miss = mmdbFixture(24, [2, 18], separator: "\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0");
+$t->same(null, mmdbLookup($miss, '1.2.3.4'), 'a record equal to the node count is not found');
+$hit = mmdbFixture(24, [0, 18], separator: "\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0");
+$t->same(['country' => 'US'], mmdbLookup($hit, '128.0.0.1'), 'a data pointer resolves the country map');
+
+// 32-bit tree carries both records inside the node.
+$hit32 = mmdbFixture(32, [0, 18], separator: "\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0");
+$t->same(['country' => 'US'], mmdbLookup($hit32, '128.0.0.1'), 'a 32-bit tree resolves the country map');
+
+// 28-bit tree: the left record spills into the separator byte the reader reads.
+$hit28 = mmdbFixture(28, [0, 0, "\x14\x00\x00", 0], separator: "\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0");
+$t->same(['country' => 'US'], mmdbLookup($hit28, '128.0.0.1'), 'a 28-bit tree resolves the country map');
+
+// An IPv6 database pads bare v4 addresses with the mapped prefix.
+$hit6 = mmdbFixture(24, [0, 18], 6, separator: "\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0");
+$t->same(['country' => 'US'], mmdbLookup($hit6, '1.2.3.4'), 'an ipv6 database pads a v4 address');
+
+/**
+ * Builds a tree whose metadata claims far more nodes than the file holds,
+ * then walks it: the walk runs off the end of the file.
+ */
+function mmdbLookupTruncated(): ?array
+{
+    $path = tempnam(sys_get_temp_dir(), 'mmdbtrunc');
+    file_put_contents($path, mmdbFixture(24, [0, 18], claimNodeCount: 5000));
+    try {
+        return (new MmdbReader($path))->lookup('128.0.0.1');
+    } finally {
+        @unlink($path);
+    }
+}
+
+$t->throws(MmdbError::class, static fn (): MmdbReader => new MmdbReader(mmdbTempFile(mmdbFixture(16, [0, 17]))), 'an unsupported record size is rejected');
+$t->throws(MmdbError::class, static fn (): MmdbReader => mmdbLookupTruncated(), 'a tree past the file end is rejected as truncated');
+$t->throws(MmdbError::class, static fn (): MmdbReader => new MmdbReader(mmdbTempFile("\xAB\xCD\xEFMaxMind.com\x00\x00")), 'non map metadata is rejected as malformed');
+
+$t->section('sus patterns: context and validator edges');
+
 $t->section('sus patterns: context and validator edges');
 
 $t->same('unknown', SusPatterns::normalizeContext(null), 'a null context normalizes to unknown');
@@ -538,6 +648,24 @@ $t->same(true, in_array('decode_budget_exhausted', array_column($budgetResult['t
 $flagBudget = [false];
 (new Preprocessor())->preprocessWithDecoded($deep, $flagBudget);
 $t->same([true], $flagBudget, 'the decode budget flag stays an array and flips to true');
+
+$t->section('shell validators: glued pair verdicts through the scanner');
+
+$cmdScanner = new SusPatterns(0.5);
+$windowCmd = $cmdScanner->detect('`id`; `uname -a`', '9.9.9.9', 'query_param');
+$t->same(true, in_array('cmd_injection', array_column($windowCmd['threats'], 'category'), true), 'a command chain after a backtick pair is injection');
+$sqlGlued = $cmdScanner->detect('SELECT`x`, `y` FROM users', '9.9.9.9', 'query_param');
+$t->same(false, in_array('cmd_injection', array_column($sqlGlued['threats'], 'category'), true), 'a sql keyword glued to a backtick pair is not injection');
+$dollarQuoted = $cmdScanner->detect('note `${HOME}` set', '9.9.9.9', 'query_param');
+$t->same(false, in_array('cmd_injection', array_column($dollarQuoted['threats'], 'category'), true), 'a substitution inside backticks is not injection');
+$dollarPlain = $cmdScanner->detect('x=${HOME}', '9.9.9.9', 'query_param');
+$t->same(true, in_array('cmd_injection', array_column($dollarPlain['threats'], 'category'), true), 'a bare substitution in a query is injection');
+
+$t->same(true, ShellValidators::braceExpansionIsDangerousCommand('x{a,b}y', ['start' => 0, 'end' => 7, 'text' => 'x{a,b}y', 'groups' => []]), 'a brace expansion with letters is dangerous');
+$t->same(false, ShellValidators::braceExpansionIsDangerousCommand('x{2,4}y', ['start' => 0, 'end' => 7, 'text' => 'x{2,4}y', 'groups' => []]), 'a brace expansion with digits only is benign');
+$t->same(false, ShellValidators::braceExpansionIsDangerousCommand('zz', ['start' => 0, 'end' => 2, 'text' => 'zz', 'groups' => []]), 'a match without braces is benign');
+
+$t->section('xml: walk continuation guards');
 
 $t->section('xml: walk continuation guards');
 

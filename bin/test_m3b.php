@@ -86,6 +86,14 @@ $t->same('unknown', ClientIpResolver::extract($r, $trusted), 'no client host, no
 $r = new SimpleGuardRequest(clientHost: '10.0.0.9');
 $t->same('10.0.0.9', ClientIpResolver::extract($r, $trusted), 'CIDR trusted proxy, no header: connecting ip');
 $t->same(true, ClientIpResolver::isTrustedProxy('10.1.2.3', ['10.0.0.0/8']), 'isTrustedProxy CIDR');
+$shallow = new SecurityConfig(trustedProxies: ['10.0.0.0/8'], trustedProxyDepth: 3);
+$r = new SimpleGuardRequest(clientHost: '10.0.0.1', headers: ['x-forwarded-for' => '198.51.100.7, 10.0.0.1']);
+$t->same('10.0.0.1', ClientIpResolver::extract($r, $shallow), 'a chain shorter than the depth returns the connecting ip');
+$r = new SimpleGuardRequest(clientHost: '10.0.0.1', headers: ['x-forwarded-for' => '   ,  , ']);
+$t->same('10.0.0.1', ClientIpResolver::extract($r, $shallow), 'an all blank chain returns the connecting ip');
+$r = new SimpleGuardRequest(clientHost: '10.0.0.1', headers: ['x-forwarded-for' => 'not-an-ip, 10.0.0.1']);
+$t->same('10.0.0.1', ClientIpResolver::extract($r, $shallow), 'an unparseable candidate falls back to the connecting ip');
+$t->same(true, ClientIpResolver::isTrustedProxy('10.1.2.3', ['10.1.2.3']), 'isTrustedProxy exact match');
 $t->same(false, ClientIpResolver::isTrustedProxy('11.1.2.3', ['10.0.0.0/8']), 'isTrustedProxy outside CIDR');
 
 $t->section('route_config: resolution and strict mode');
