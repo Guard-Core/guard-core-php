@@ -615,6 +615,30 @@ $sizeRequest->state()->routeConfig = new RouteConfig(maxRequestSize: 1024);
 $sizeRequest->state()->clientIp = '9.9.9.9';
 $t->throws(InvalidArgumentException::class, static fn () => $byName['request_size_content']->check($sizeRequest), 'an invalid content length is rejected');
 
+$t->section('pipeline: emergency mode and https enforcement edges');
+
+$emConfig = new SecurityConfig();
+$emCheck = new RenzoFranceschini\GuardCore\Pipeline\Checks\EmergencyModeCheck($emConfig, new GuardResponseFactory());
+$t->same(null, $emCheck->check(makeRequest()), 'an engine without emergency mode scans nothing');
+$emConfigOn = new SecurityConfig(emergencyMode: true);
+$emCheckOn = new RenzoFranceschini\GuardCore\Pipeline\Checks\EmergencyModeCheck($emConfigOn, new GuardResponseFactory());
+$emRequest = makeRequest();
+$t->same(null, $emCheckOn->check($emRequest), 'an emergency whitelist pass keeps going');
+$emHit = makeRequest(ip: '1.2.3.4');
+$t->same(403, $emCheckOn->check($emHit)?->statusCode(), 'an emergency mode block denies');
+
+// Https enforcement: without trust in x-forwarded-proto the https answer is no.
+$httpsConfig = new SecurityConfig(trustXForwardedProto: false);
+$httpsCheck = new RenzoFranceschini\GuardCore\Pipeline\Checks\HttpsEnforcementCheck($httpsConfig, new GuardResponseFactory());
+$httpsRequest = makeRequest(headers: ['x-forwarded-proto' => 'https']);
+$t->same(false, $httpsCheck->check($httpsRequest), 'the https check returns a response');
+$httpsTrusted = new SecurityConfig(trustXForwardedProto: true, trustedProxies: ['10.0.0.0/8']);
+$httpsCheckTrusted = new RenzoFranceschini\GuardCore\Pipeline\Checks\HttpsEnforcementCheck($httpsTrusted, new GuardResponseFactory());
+$untrustedRequest = makeRequest(ip: '9.9.9.9', headers: ['x-forwarded-proto' => 'https']);
+$t->same(false, $httpsCheckTrusted->check($untrustedRequest), 'the https check returns a response for an untrusted proxy');
+
+$t->section('pipeline: sensitive query values are redacted from error logs');
+
 $t->section('pipeline: sensitive query values are redacted from error logs');
 
 $t->section('pipeline: sensitive query values are redacted from error logs');

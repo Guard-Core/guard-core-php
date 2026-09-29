@@ -449,6 +449,9 @@ $t->same(true, str_contains($portUrl, ':8443'), 'ports survive redaction');
 $t->same(true, str_contains($portUrl, '#frag'), 'fragments survive redaction');
 $t->same(true, LogRedactor::sensitiveNames(['extra_param'], ['extra_body'], ['Extra_Header']) !== [], 'sensitive names merge extras');
 
+$t->same('{broken', LogRedactor::redactBlob('{broken'), 'a malformed json blob falls back to the raw text');
+$t->same('["keep", 1]', LogRedactor::redactBlob('["keep", 1]'), 'an unchanged json list falls back to the raw text');
+
 $t->section('redaction: blob and url edge surfaces');
 
 $t->same('', LogRedactor::redactBlob(''), 'an empty blob stays empty');
@@ -480,7 +483,7 @@ $t->same('\\xf4\\x90\\x80\\x80', LogSanitizer::sanitize("\xf4\x90\x80\x80"), 'an
 $t->section('simple request logger: records');
 
 $records = [];
-$logger = new SimpleRequestLogger(false);
+$logger = new SimpleRequestLogger(true);
 $prop = new ReflectionProperty(SimpleRequestLogger::class, 'records');
 $prop->setAccessible(true);
 $prop->setValue($logger, [['level' => 'info', 'message' => 'seed', 'context' => []]]);

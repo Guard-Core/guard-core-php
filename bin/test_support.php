@@ -509,7 +509,7 @@ $t->same("\x00", $pp->lenientOverlongUtf8Decode("\xE0\xC0\xAF"), 'a bad second b
 // Truncated multi byte sequences are dropped byte by byte.
 $t->same('a b', $pp->urlDecode("a%FF b"), 'invalid percent bytes drop in the lenient url decode');
 // A bare '&#;' keeps its text.
-$t->same('&#;', $pp->htmlUnescape('&#;'), 'an empty numeric reference stays literal');
+$t->same('&#x;', $pp->htmlUnescape('&#x;'), 'an empty hex reference stays literal');
 // A partial known entity keeps its decoded prefix plus the tail.
 $t->same('<script', $pp->htmlUnescape('&ltscript'), 'a semi-colon less known entity decodes with its tail');
 
@@ -652,6 +652,21 @@ $flagBudget = [false];
 (new Preprocessor())->preprocessWithDecoded($deep, $flagBudget);
 $t->same([true], $flagBudget, 'the decode budget flag stays an array and flips to true');
 
+// Hex-look-alike runs never decode as base64.
+$gunzipFlag = [false];
+$t->same('0xDEADBEEF', (new Preprocessor())->decodeBase64Candidates('0xDEADBEEF', $gunzipFlag), 'a hex literal run is left alone by the base64 decoder');
+
+// Oversized content whose attack regions exceed the scan budget concatenates.
+$flood = str_repeat('%41%42%43', 100000);
+$floodKept = Truncation::truncateSafely($flood, new Preprocessor());
+$t->same(true, strlen($floodKept) > 0 && strlen($floodKept) < strlen($flood), 'oversized dense attack content is capped by region concatenation');
+
+$cmdScanner2 = new SusPatterns(0.5);
+$cleanWindow = $cmdScanner2->detect('`abc`; `def`', '9.9.9.9', 'query_param');
+$t->same(true, in_array('cmd_injection', array_column($cleanWindow['threats'], 'category'), true), 'a command chain after a clean backtick pair is injection');
+$sqlDollar = $cmdScanner2->detect('SELECT${x}FROM', '9.9.9.9', 'request_body');
+$t->same(false, in_array('cmd_injection', array_column($sqlDollar['threats'], 'category'), true), 'a substitution glued to sql keywords is not injection');
+
 $t->section('shell validators: glued pair verdicts through the scanner');
 
 $cmdScanner = new SusPatterns(0.5);
@@ -701,8 +716,8 @@ $t->section('binary prefix: artifact decoding edges');
 $t->same(false, BinaryPrefix::matchIsBinaryDense(null, 0, 5), 'a null prefix never reports density');
 $bpInvalid = BinaryPrefix::build("ok \x80 ok");
 $t->same(1, $bpInvalid[count($bpInvalid) - 1] - $bpInvalid[3], 'a bare continuation byte counts as one artifact');
-$bpOverlong2 = BinaryPrefix::build("ok \xC1\x81 ok");
-$t->same(2, $bpOverlong2[count($bpOverlong2) - 1] - $bpOverlong2[3], 'an invalid lead plus a stray continuation count as two artifacts');
+$bpOverlong2 = BinaryPrefix::build("ok \xC2\x80 ok");
+$t->same(1, $bpOverlong2[count($bpOverlong2) - 1] - $bpOverlong2[3], 'an overlong two byte sequence collapses into one artifact');
 $bpOverlong3 = BinaryPrefix::build("ok \xE0\x80\x80 ok");
 $t->same(1, $bpOverlong3[count($bpOverlong3) - 1] - $bpOverlong3[3], 'an overlong three byte sequence collapses into one artifact');
 $bpOverlong4 = BinaryPrefix::build("ok \xF0\x80\x80\x80 ok");

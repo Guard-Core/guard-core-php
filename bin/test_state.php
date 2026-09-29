@@ -15,6 +15,29 @@ use RenzoFranceschini\GuardCore\Redis\RespPipeline;
 require __DIR__ . '/../vendor/autoload.php';
 require __DIR__ . '/../tests/FakeRespConnection.php';
 
+final class AbortingExecConnection extends RespConnection
+{
+    public function writeCommands(array $commands): void
+    {
+        $this->replies = ['OK'];
+        foreach ($commands as $index => $_) {
+            if ($index === 0) {
+                continue;
+            }
+            $this->replies[] = $index === 1 ? 'ERR nope' : 'QUEUED';
+        }
+        $this->replies[] = 'NOT-AN-ARRAY';
+    }
+
+    public function readReplies(int $count): array
+    {
+        $out = array_slice($this->replies, 0, $count);
+        $this->replies = array_slice($this->replies, $count);
+
+        return $out;
+    }
+}
+
 final class TestRunner
 {
     public int $passed = 0;
@@ -370,6 +393,14 @@ $respPipe->set('k', 'v', ex: 60);
 $respPipe->set('k2', 'v2', px: 500);
 $respPipe->del('k', 'k2');
 $t->same(['OK', 'OK', 2], $respPipe->execute(), 'set with ex, px and a multi key del execute');
+
+$t->section('resp pipeline: aborted exec');
+
+$abortFake = new AbortingExecConnection();
+$abortPipe = $abortFake->pipeline()->multi();
+$abortPipe->set('a', 'b');
+$abortPipe->set('c', 'd');
+$t->throws(static fn () => $abortPipe->execute(), GuardRedisException::class, 'a non array exec reply aborts the pipeline');
 
 $t->section('resp connection: scripted stream error paths');
 

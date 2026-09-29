@@ -599,4 +599,31 @@ $t->throws(static fn () => new BehaviorRule('usage', 1, pattern: 3), TypeError::
 $t->throws(static fn () => BehaviorRule::fromArray(['rule_type' => 3, 'threshold' => 1]), InvalidArgumentException::class, null, 'a non string rule type in fromArray is rejected');
 $t->throws(static fn () => BehaviorRule::fromArray(['rule_type' => 'usage']), InvalidArgumentException::class, null, 'fromArray without a threshold is rejected');
 
+$t->section('processor: route and rule type guards');
+
+$guardLogs = [];
+$guardTracker = new BehaviorTracker(new SecurityConfig(enableRedis: false, behaviorScanResponseBody: true), null, null);
+$guardProcessor = new BehavioralProcessor(new SecurityConfig(enableRedis: false), $guardTracker, null, static function (string $level, string $message, array $context) use (&$guardLogs): void {
+    $guardLogs[] = $message;
+});
+// A null route config leaves both processors idle.
+$guardProcessor->processReturnRules(behaviorRequest('/x'), $factory->createResponse('denied', 200), '10.10.0.1', null, microtime(true));
+$t->same([], $guardLogs, 'return processing without a route config is idle');
+// Global rules of a non return type are skipped.
+$usageGlobal = new SecurityConfig(enableRedis: false, globalBehaviorRules: [['rule_type' => 'usage', 'threshold' => 1, 'window' => 60, 'action' => 'log']]);
+$guardProcessor2 = new BehavioralProcessor($usageGlobal, $guardTracker, null, static function (string $level, string $message, array $context) use (&$guardLogs): void {
+    $guardLogs[] = $message;
+});
+$guardProcessor2->processGlobalReturnRules(behaviorRequest('/x'), $factory->createResponse('denied', 200), '10.10.0.2', microtime(true));
+$t->same([], $guardLogs, 'global processing skips usage rules');
+
+// Active ban action with no ban manager attached: nothing happens.
+$activeTracker = new BehaviorTracker(new SecurityConfig(enableRedis: false), null, null);
+$activeTracker->applyAction(new BehaviorRule('usage', 1, action: 'ban'), '10.10.0.3', 'GET:/x', 'no-ban-manager');
+$t->same(true, true, 'an active ban without a ban manager is a no-op');
+
+// The config drops invalid global behavior rules silently.
+$invalidGlobal = new SecurityConfig(globalBehaviorRules: [['rule_type' => 'usage', 'threshold' => 1, 'pattern' => 'x']]);
+$t->same([], array_keys($invalidGlobal->globalBehaviorRules), 'a pattern on a usage rule is dropped');
+
 exit($t->done('test_behavior'));

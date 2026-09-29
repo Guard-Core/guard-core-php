@@ -94,6 +94,14 @@ $t->same('10.0.0.1', ClientIpResolver::extract($r, $shallow), 'an all blank chai
 $r = new SimpleGuardRequest(clientHost: '10.0.0.1', headers: ['x-forwarded-for' => 'not-an-ip, 10.0.0.1']);
 $t->same('10.0.0.1', ClientIpResolver::extract($r, $shallow), 'an unparseable candidate falls back to the connecting ip');
 $t->same(true, ClientIpResolver::isTrustedProxy('10.1.2.3', ['10.1.2.3']), 'isTrustedProxy exact match');
+$dropRoute = new RenzoFranceschini\GuardCore\Routing\RouteConfig(
+    behaviorRules: [['rule_type' => 3, 'threshold' => 1]],
+    blockCloudProviders: [3]
+);
+$t->same([], $dropRoute->behaviorRules, 'an invalid behavior rule is dropped silently');
+$t->same([], $dropRoute->blockCloudProviders, 'a non string cloud selector is dropped silently');
+$slashConfig = new RenzoFranceschini\GuardCore\Config\SecurityConfig(excludePaths: ['/']);
+$t->same([], $slashConfig->excludePaths, 'the root path exclusion normalizes away');
 $t->same(false, ClientIpResolver::isTrustedProxy('11.1.2.3', ['10.0.0.0/8']), 'isTrustedProxy outside CIDR');
 
 $t->section('route_config: resolution and strict mode');

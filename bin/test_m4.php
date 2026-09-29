@@ -8,6 +8,7 @@ use RenzoFranceschini\GuardCore\Cloud\CloudManager;
 use RenzoFranceschini\GuardCore\Cloud\CloudIpStore;
 use RenzoFranceschini\GuardCore\Cloud\CloudProviderRegistry;
 use RenzoFranceschini\GuardCore\Cloud\CurlHttpClient;
+use RenzoFranceschini\GuardCore\GeoIp\GeoIpManager;
 use RenzoFranceschini\GuardCore\Cloud\HttpClient;
 use RenzoFranceschini\GuardCore\Cloud\HttpResponse;
 use RenzoFranceschini\GuardCore\Cloud\InMemoryCloudIpStore;
@@ -783,6 +784,24 @@ $azure500->script = [
 ];
 $t->throws(CloudHttpException::class, static fn () => CloudFetchers::downloadAzureServiceTags($azure500, "https://download.microsoft.com/ServiceTags_Public_{$today}.json", microtime(true) + 20.0), 'azure: a non-success download raises');
 $t->throws(CloudHttpException::class, static fn () => CloudFetchers::downloadAzureServiceTags($azure500, "https://download.microsoft.com/ServiceTags_Public_{$today}.json", microtime(true) - 1.0), 'azure: an elapsed deadline raises without a request');
+
+$azureExhaust = new M4ScriptedClient();
+$azureExhaust->script = [
+    'https://www.microsoft.com/en-us/download/details.aspx?id=56519' => [new HttpResponse(200, $azurePage)],
+    "https://download.microsoft.com/ServiceTags_Public_{$today}.json" => [
+        new CloudHttpException('one'),
+        new CloudHttpException('two'),
+        new CloudHttpException('three'),
+    ],
+];
+$t->throws(CloudHttpException::class, static fn () => CloudFetchers::downloadAzureServiceTags($azureExhaust, "https://download.microsoft.com/ServiceTags_Public_{$today}.json", microtime(true) + 20.0), 'azure: exhausting the retries rethrows the last failure');
+$t->same(null, CloudFetchers::extractFailoverLinkUrl('<a id="failoverLink">no href</a>'), 'azure: a failover anchor without an href returns null');
+
+// GeoIpManager surfaces.
+$geoManager = new GeoIpManager('/nonexistent/database.mmdb');
+$t->same('/nonexistent/database.mmdb', $geoManager->dbPath(), 'the manager reports its database path');
+$t->same(null, $geoManager->getCountry('192.0.2.1'), 'a failed database open resolves no country');
+$t->same(null, $geoManager->getCountry('192.0.2.2'), 'a remembered failure resolves no country without reopening');
 
 $t->section('cloud fetchers: csv and json feeds');
 
