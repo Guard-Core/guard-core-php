@@ -83,7 +83,13 @@ function runPipelineIntegration(T $t): void
 function deleteOwnKeys(RedisHandler $redis): void
 {
     $conn = $redis->connection();
-    foreach ($redis->keys('guard_core_pipeline:*') as $key) {
-        $conn->del($key);
+    // keys() prepends the handler prefix itself, so the patterns must be
+    // namespace-relative (a full 'guard_core_pipeline:*' pattern would be
+    // double-prefixed and silently match nothing).
+    foreach (['rate_limit:*', 'banned_ips:*', 'behavior_usage:*', 'behavior_returns:*'] as $pattern) {
+        $keys = $redis->keys($pattern);
+        if ($keys !== []) {
+            $conn->del(...$keys);
+        }
     }
 }

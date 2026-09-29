@@ -5,8 +5,8 @@ declare(strict_types=1);
 use RenzoFranceschini\GuardCore\Ban\BanEventSink;
 use RenzoFranceschini\GuardCore\Ban\IpBanManager;
 use RenzoFranceschini\GuardCore\Ip\CanonicalIp;
-use RenzoFranceschini\GuardCore\Redis\GuardRedisException;
 use RenzoFranceschini\GuardCore\Redis\RedisHandler;
+use RenzoFranceschini\GuardCore\Redis\GuardRedisException;
 use RenzoFranceschini\GuardCore\Redis\RespConnection;
 use RenzoFranceschini\GuardCore\Redis\RespPipeline;
 
@@ -305,6 +305,114 @@ for ($i = 0; $i <= 10001; $i++) {
 }
 $t->ok(!$oMgr->isIpBanned('9.0.0.0'), 'the first banned ip was evicted');
 $t->ok($oMgr->isIpBanned('9.0.39.17'), 'the newest banned ip survives');
+
+$t->section('resp connection: scripted stream error paths');
+
+/**
+ * Starts tests/resp_scripted_server.php in the given mode and returns
+ * [proc, port]; the caller must proc_close in a finally.
+ */
+function startRespServer(string $mode): array
+{
+    $command = [PHP_BINARY, __DIR__ . '/../tests/resp_scripted_server.php', $mode];
+    $proc = proc_open($command, [1 => ['pipe', 'w'], 2 => ['pipe', 'w']], $pipes);
+    if (!is_resource($proc)) {
+        throw new RuntimeException('failed to start the scripted resp server');
+    }
+    $portLine = fgets($pipes[1], 32);
+    if ($portLine === false) {
+        proc_terminate($proc);
+        throw new RuntimeException('the scripted resp server printed no port');
+    }
+
+    return [$proc, $pipes, (int) trim($portLine)];
+}
+
+function withRespServer(string $mode, callable $fn): void
+{
+    [$proc, $pipes, $port] = startRespServer($mode);
+    try {
+        $fn(new RespConnection('127.0.0.1', $port, 2.0, 2.0));
+    } finally {
+        foreach ($pipes as $pipe) {
+            fclose($pipe);
+        }
+        proc_terminate($proc);
+        proc_close($proc);
+    }
+}
+
+function respExpect(string $mode, callable $fn, string $label): void
+{
+    global $t;
+    try {
+        withRespServer($mode, $fn);
+        $t->ok(true, $label);
+    } catch (GuardRedisException $e) {
+        $t->ok(str_contains($e->getMessage(), 'Redis'), "{$label} ({$e->getMessage()})");
+    }
+}
+
+// A non-array reply to KEYS and ZRANGEBYSCORE yields an empty list.
+respExpect('int_reply', static function (RespConnection $conn): void {
+    global $t;
+    $conn->ping();
+    $t->same([], $conn->keys('nomatch:*'), 'a non array keys reply yields an empty list');
+    $t->same([], $conn->zRangeByScore('z', '0', '10'), 'a non array zrange reply yields an empty list');
+}, 'int replies keep the connection usable');
+respExpect('null_array', static function (RespConnection $conn): void {
+    global $t;
+    $t->same([], $conn->keys('*'), 'a null array keys reply yields an empty list');
+    $t->same([], $conn->zRangeByScore('z', '0', '10'), 'a null array zrange reply yields an empty list');
+}, 'null array replies yield empty lists');
+
+// A redis -ERR reply surfaces as GuardRedisException.
+respExpect('error', static function (RespConnection $conn): void {
+    $conn->ping();
+}, 'an error reply throws with the redis prefix');
+
+// A null bulk decodes to PHP null.
+respExpect('null_bulk', static function (RespConnection $conn): void {
+    global $t;
+    $t->same(null, $conn->get('missing'), 'a null bulk reply decodes to null');
+}, 'null bulk replies decode');
+
+// An unknown reply type byte is a protocol error.
+respExpect('garbage', static function (RespConnection $conn): void {
+    $conn->ping();
+}, 'an unknown reply type throws a protocol error');
+
+// A server that closes without replying produces the empty-reply error.
+respExpect('close_now', static function (RespConnection $conn): void {
+    $conn->ping();
+}, 'a closed socket produces the empty reply error');
+
+// A truncated bulk payload dies in the byte reader.
+respExpect('half_bulk', static function (RespConnection $conn): void {
+    $conn->get('k');
+}, 'a truncated bulk reply fails the byte read');
+
+// A server that never answers trips the socket timeout in the line reader.
+$t0 = microtime(true);
+try {
+    withRespServer('hang', static function (RespConnection $conn): void {
+        $conn->ping();
+    });
+    $t->ok(false, 'a silent server throws the timeout error');
+} catch (GuardRedisException $e) {
+    $t->ok(str_contains($e->getMessage(), 'timeout'), 'a silent server trips the socket timeout (' . $e->getMessage() . ')');
+}
+$t->ok(microtime(true) - $t0 < 4, 'the timeout fires at the client budget, not the server one');
+
+// A peer that disappears mid-write fails the write loop.
+try {
+    withRespServer('rst', static function (RespConnection $conn): void {
+        $conn->zAdd('bigz', 1.0, str_repeat('x', 4 * 1024 * 1024));
+    });
+    $t->same('no-exception', 'GuardRedisException', 'a failed write throws');
+} catch (GuardRedisException $e) {
+    $t->ok(str_contains($e->getMessage(), 'Redis write failed'), 'a dead peer fails the write loop (' . $e->getMessage() . ')');
+}
 
 $exit = $t->summary();
 

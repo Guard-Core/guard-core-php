@@ -20,6 +20,7 @@ use RenzoFranceschini\GuardCore\Ip\CanonicalIp;
 use RenzoFranceschini\GuardCore\Detection\LdapIpv4;
 use RenzoFranceschini\GuardCore\Detection\Pickle;
 use RenzoFranceschini\GuardCore\Detection\Preg;
+use RenzoFranceschini\GuardCore\Detection\PregFailure;
 use RenzoFranceschini\GuardCore\Detection\Truncation;
 use RenzoFranceschini\GuardCore\Detection\XmlXxe;
 use RenzoFranceschini\GuardCore\Support\CMatch;
@@ -517,6 +518,30 @@ $t->same(true, in_array('decode_budget_exhausted', array_column($budgetResult['t
 $flagBudget = [false];
 (new Preprocessor())->preprocessWithDecoded($deep, $flagBudget);
 $t->same([true], $flagBudget, 'the decode budget flag stays an array and flips to true');
+
+$t->section('preg: safeEval, group gaps, and failure surfaces');
+
+$t->throws(PregFailure::class, static fn () => Preg::safeEval('/[unclosed/', 'x'), 'safeEval throws on an invalid pattern');
+$t->same(null, Preg::safeEval("\x01zzz\x01ui", 'nothing here'), 'safeEval returns null without a match');
+$evalHit = Preg::safeEval("\x01(a)|(b)\x01ui", 'zzb');
+$t->same('b', $evalHit[0]['text'] ?? null, 'safeEval reports the match text at group zero');
+$t->same(true, array_key_exists(1, $evalHit) && $evalHit[1] === null, 'an unparticipating group decodes as null');
+
+$t->throws(PregFailure::class, static fn () => Preg::allMatches('[unclosed', 'x'), 'allMatches throws on an invalid pattern');
+$altHits = Preg::allMatches('(a)|(b)', 'zzb zzxx');
+$t->same(true, array_key_exists(1, $altHits[0]['groups']) && $altHits[0]['groups'][1] === null, 'allMatches marks the skipped alternative null');
+
+$t->throws(PregFailure::class, static fn () => Preg::matchAnchoredAt('[unclosed', 'x', 0), 'matchAnchoredAt throws on an invalid pattern');
+$anchored = Preg::matchAnchoredAt('(a)|(b)', 'zzb', 2);
+$t->same(true, array_key_exists(1, $anchored['groups']) && $anchored['groups'][1] === null, 'matchAnchoredAt marks the skipped alternative null');
+$t->same(null, Preg::matchAnchoredAt('(a)', '', 0), 'an empty segment anchors nothing');
+
+$t->throws(PregFailure::class, static fn () => Preg::searchFrom('[unclosed', 'subject', 0), 'searchFrom throws on an invalid pattern');
+
+$replaced = Preg::replace('(a)|(b)', 'zzb', static fn (array $m): string => ($m['groups'][1]['start'] ?? 0) === -1 && $m['text'] === 'b' ? '[bee]' : '?');
+$t->same('zz[bee]', $replaced, 'replace flags unparticipating groups with a minus one start');
+
+$t->same(2, Preg::cp("xééy", 3), 'cp converts a byte offset to a code point index');
 
 $total = $t->passed + $t->failed;
 echo "\nPassed: {$t->passed}, Failed: {$t->failed}\n";

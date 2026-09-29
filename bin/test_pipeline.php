@@ -6,6 +6,8 @@ use RenzoFranceschini\GuardCore\Ban\IpBanManager;
 use RenzoFranceschini\GuardCore\Config\SecurityConfig;
 use RenzoFranceschini\GuardCore\Config\UnsupportedFeatureError;
 use RenzoFranceschini\GuardCore\Detection\SusPatterns;
+use RenzoFranceschini\GuardCore\Cloud\CloudManager;
+use RenzoFranceschini\GuardCore\Engine\GuardEngine;
 use RenzoFranceschini\GuardCore\Pipeline\BlockEvents;
 use RenzoFranceschini\GuardCore\Pipeline\CheckFactory;
 use RenzoFranceschini\GuardCore\Pipeline\Checks\IpSecurityCheck;
@@ -449,6 +451,107 @@ $t->same(false, $bans->isIpBanned('7.7.7.7'), 'below threshold not banned');
 $pipeline->execute(makeRequest(path: '/s', ip: '7.7.7.7', query: ['q' => '<script>x</script>']));
 $t->same(true, $bans->isIpBanned('7.7.7.7'), 'threshold reached -> ban applied');
 $t->same(403, $pipeline->execute(makeRequest(path: '/s', ip: '7.7.7.7', query: ['q' => 'safe']))?->statusCode(), 'subsequent clean request blocked by ban');
+
+$t->section('engine: accessors, fail-closed response, and headers');
+
+$engineConfig = new SecurityConfig(securityHeaders: ['enabled' => true]);
+$engine = new GuardEngine($engineConfig);
+$t->same($engineConfig, $engine->config(), 'the engine returns its config');
+$t->same(true, $engine->redis() instanceof RedisHandler, 'the engine exposes its redis handler');
+$t->same(true, $engine->banManager() instanceof IpBanManager, 'the engine exposes its ban manager');
+$t->same(true, $engine->rateLimitHandler() instanceof RateLimitHandler, 'the engine exposes its rate limit handler');
+$t->same(null, $engine->cloudManager(), 'no cloud manager without cloud blocking');
+$t->same(true, $engine->responseFactory() instanceof GuardResponseFactory, 'the engine exposes its response factory');
+$t->same(true, $engine->pipeline() instanceof SecurityCheckPipeline, 'the engine exposes its pipeline');
+$t->same(true, $engine->responseHeaders() !== [], 'the default engine carries response headers');
+
+$headersEngine = new GuardEngine(new SecurityConfig(blockCloudProviders: ['AWS'], securityHeaders: ['enabled' => true]));
+$t->same(true, $headersEngine->cloudManager() instanceof CloudManager, 'cloud blocking builds a cloud manager');
+$failClosed = $headersEngine->failClosedResponse();
+$t->same(500, $failClosed->statusCode(), 'the fail closed response is a 500');
+$t->same(true, $failClosed->headers()->get('x-frame-options') !== null, 'the fail closed response carries security headers');
+
+// A path that fails URL normalization is never treated as excluded.
+$pathEngine = new GuardEngine(new SecurityConfig());
+$pathResponse = $pathEngine->execute(new SimpleGuardRequest(urlPath: '/..'));
+$t->same(true, $pathResponse === null || $pathResponse instanceof GuardResponse, 'an unnormalizable path still flows through the pipeline');
+
+$disabledEngine = new GuardEngine(new SecurityConfig(enableRedis: false));
+$disabledEngine->initialize();
+$disabledEngine->banManager()->ban('9.8.7.6', 60);
+$t->same(true, $disabledEngine->banManager()->isIpBanned('9.8.7.6'), 'initialize without redis leaves local-only banning');
+
+$t->section('pipeline: checks accessor and rebuild failure semantics');
+
+$emptyConfig = new SecurityConfig();
+$emptyPipeline = new SecurityCheckPipeline([], $emptyConfig, [], rebuildChecks: static fn (): array => [], configProvider: static fn (): SecurityConfig => $emptyConfig);
+$t->same([], $emptyPipeline->checks(), 'the pipeline exposes its check list');
+
+$boomConfig = new SecurityConfig();
+$boomLive = $boomConfig;
+$boomPipeline = new SecurityCheckPipeline(
+    (new CheckFactory(new GuardResponseFactory(), new RouteResolver(), new IpBanManager(), new RateLimitHandler(new RateLimitConfig())))->buildChecks($boomConfig),
+    $boomConfig,
+    [],
+    rebuildChecks: static function (): array {
+        throw new RuntimeException('rebuild exploded');
+    },
+    configProvider: function () use (&$boomLive): SecurityConfig { return $boomLive; },
+    log: static function (string $l, string $m, array $c): void {
+    },
+);
+$boomLive = $boomConfig->with(['rate_limit' => 7]);
+$t->same(500, $boomPipeline->execute(makeRequest())?->statusCode(), 'a rebuild failure in fail-secure mode blocks with a 500');
+
+$lenientConfig = new SecurityConfig(failSecure: false);
+$lenientLive = $lenientConfig;
+$lenientPipeline = new SecurityCheckPipeline(
+    (new CheckFactory(new GuardResponseFactory(), new RouteResolver(), new IpBanManager(), new RateLimitHandler(new RateLimitConfig())))->buildChecks($lenientConfig),
+    $lenientConfig,
+    [],
+    rebuildChecks: static function (): array {
+        throw new RuntimeException('rebuild exploded');
+    },
+    configProvider: function () use (&$lenientLive): SecurityConfig { return $lenientLive; },
+    log: static function (string $l, string $m, array $c): void {
+    },
+);
+$lenientLive = $lenientConfig->with(['rate_limit' => 7]);
+$t->same(null, $lenientPipeline->execute(makeRequest()), 'a rebuild failure without fail secure keeps serving on the old checks');
+
+$t->throws(RuntimeException::class, static function (): void {
+    $strictConfig = new SecurityConfig();
+    $strictLive = $strictConfig;
+    $strictPipeline = new SecurityCheckPipeline(
+        [],
+        $strictConfig,
+        [],
+        rebuildChecks: static function (): array {
+            throw new RuntimeException('rebuild exploded');
+        },
+        configProvider: function () use (&$strictLive): SecurityConfig { return $strictLive; },
+        log: static function (string $l, string $m, array $c): void {
+        },
+    );
+    $strictLive = $strictConfig->with(['rate_limit' => 7]);
+    $strictPipeline->execute(makeRequest());
+}, 'a rebuild failure with no checks rethrows');
+
+$t->section('pipeline: sensitive query values are redacted from error logs');
+
+$redactLogs = [];
+$redactConfig = new SecurityConfig(logSensitiveParams: ['token']);
+$throwing = new RecordingCheck('boom', $order, static function (): never {
+    throw new RuntimeException('leak SUPERSECRETVALUE here');
+});
+$redactPipeline = new SecurityCheckPipeline([$throwing], $redactConfig, [], log: static function (string $l, string $m, array $c) use (&$redactLogs): void {
+    $redactLogs[] = $m;
+});
+$redactResponse = $redactPipeline->execute(makeRequest(query: ['token' => 'SUPERSECRETVALUE']));
+$t->same(500, $redactResponse?->statusCode(), 'a throwing check in fail-secure mode blocks');
+$redactedLine = implode("\n", $redactLogs);
+$t->same(true, str_contains($redactedLine, '[REDACTED]'), 'the error log carries the redaction marker');
+$t->same(true, !str_contains($redactedLine, 'SUPERSECRETVALUE'), 'the error log never carries the sensitive value');
 
 $integration = getenv('REDIS_HOST') !== '0';
 if ($integration) {
