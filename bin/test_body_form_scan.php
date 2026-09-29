@@ -118,6 +118,18 @@ function textPartBody(string $name, string $content): string
     return "--B0\r\nContent-Disposition: form-data; name=\"{$name}\"\r\n\r\n" . $content . "\r\n--B0--\r\n";
 }
 
+/** The scanned values (entry[0]) of one single-part body with the given content-disposition. */
+function dispEntries(string $disposition): array
+{
+    $entries = BodyFormScan::multipartScanEntries(
+        "--B0\r\n{$disposition}\r\n\r\npayload\r\n--B0--\r\n",
+        MULTIPART_CT,
+        16
+    );
+
+    return array_map(static fn (array $e): string => $e[0], $entries);
+}
+
 const MULTIPART_CT = 'multipart/form-data; boundary=B0';
 const OCTET_STREAM_CT = 'application/octet-stream';
 const TEXT_CT = 'text/plain';
@@ -299,6 +311,220 @@ $t->same(true, blocked(makeCheck(new SecurityConfig(excludedDetectionBodyFields:
 $t->section('empty exclusion config keeps current behavior');
 $t->same(true, blocked(makeCheck(new SecurityConfig()), json_encode(['search' => SCRIPT]), JSON_CT), 'JSON body attack blocks with no exclusions');
 $t->same(true, blockedQueryValue(makeCheck(new SecurityConfig()), SCRIPT), 'query attack blocks with no exclusions');
+
+$t->section('multipart parts: exact leaf shapes');
+
+// An empty part (no headers, no filename, empty payload) carries no values
+// and contributes no entries.
+$t->same([], BodyFormScan::multipartScanEntries("--B0\r\n\r\n--B0--\r\n", MULTIPART_CT, 16), 'an empty part yields no entries');
+$t->same(null, BodyFormScan::multipartParts('body', 'text/plain', 16), 'a non multipart content type parses no parts');
+$t->same(null, BodyFormScan::multipartParts('body', 'multipart/form-data', 16), 'a multipart content type without a boundary parses no parts');
+$t->same([['1 OR 1=1', 'request_body', null, '']], BodyFormScan::bodyScanEntries(TAUTOLOGY, 'multipart/form-data', 16), 'a boundary-less multipart body falls back to the blob scan');
+
+// Consecutive boundary lines are swallowed by the consume loop.
+$t->same([
+    ['up', 'request_body', null, "Multipart field name 'up': "],
+    ['Content-Disposition: form-data; name="up"', 'request_body:multipart_field', null, "Request body field 'up': "],
+    ['v', 'request_body:multipart_field', null, "Request body field 'up': "],
+], BodyFormScan::multipartScanEntries("--B0\r\n--B0\r\nContent-Disposition: form-data; name=\"up\"\r\n\r\nv\r\n--B0--\r\n", MULTIPART_CT, 16), 'consecutive boundary lines are swallowed');
+
+// A close delimiter before any part keeps the whole body preamble.
+$t->same(null, BodyFormScan::multipartScanEntries("--B0--\r\nafter", MULTIPART_CT, 16), 'a close delimiter before any part parses no parts');
+
+// An inter-part boundary while a part is buffered closes that part.
+$t->same([
+    ['a', 'request_body', null, "Multipart field name 'a': "],
+    ['Content-Disposition: form-data; name="a"', 'request_body:multipart_field', null, "Request body field 'a': "],
+    ['va', 'request_body:multipart_field', null, "Request body field 'a': "],
+    ['b', 'request_body', null, "Multipart field name 'b': "],
+    ['Content-Disposition: form-data; name="b"', 'request_body:multipart_field', null, "Request body field 'b': "],
+    ['vb', 'request_body:multipart_field', null, "Request body field 'b': "],
+], BodyFormScan::multipartScanEntries("--B0\r\nContent-Disposition: form-data; name=\"a\"\r\n\r\nva\r\n--B0\r\nContent-Disposition: form-data; name=\"b\"\r\n\r\nvb\r\n--B0--\r\n", MULTIPART_CT, 16), 'a second part splits at its boundary');
+
+// A missing close delimiter keeps the parts parsed so far
+// (CloseBoundaryNotFoundDefect).
+$t->same([
+    ['a', 'request_body', null, "Multipart field name 'a': "],
+    ['Content-Disposition: form-data; name="a"', 'request_body:multipart_field', null, "Request body field 'a': "],
+    ['payload', 'request_body:multipart_field', null, "Request body field 'a': "],
+], BodyFormScan::multipartScanEntries("--B0\r\nContent-Disposition: form-data; name=\"a\"\r\n\r\npayload", MULTIPART_CT, 16), 'an unterminated body keeps its parts');
+
+$t->section('multipart parts: content-type routing');
+
+$t->same([
+    ['a', 'request_body', null, "Multipart field name 'a': "],
+    ['Content-Type: text/plain', 'request_body:multipart_field', null, "Request body field 'a': "],
+    ['Content-Disposition: form-data; name="a"', 'request_body:multipart_field', null, "Request body field 'a': "],
+    ['body', 'request_body:multipart_field', null, "Request body field 'a': "],
+], BodyFormScan::multipartScanEntries("--B0\r\nContent-Type: text/plain\r\nContent-Disposition: form-data; name=\"a\"\r\n\r\nbody\r\n--B0--\r\n", MULTIPART_CT, 16), 'a leaf part with a content-type keeps both headers in order');
+
+// A nested multipart container recurses into its own boundary.
+$t->same([
+    ['inner', 'request_body', null, "Multipart field name 'inner': "],
+    ['Content-Disposition: form-data; name="inner"', 'request_body:multipart_field', null, "Request body field 'inner': "],
+    ['inner-body', 'request_body:multipart_field', null, "Request body field 'inner': "],
+], BodyFormScan::multipartScanEntries(
+    "--B0\r\nContent-Type: multipart/mixed; boundary=N0\r\n\r\n--N0\r\nContent-Disposition: form-data; name=\"inner\"\r\n\r\ninner-body\r\n--N0--\r\n--B0--\r\n",
+    MULTIPART_CT,
+    16
+), 'a nested multipart container recurses into its sub-parts');
+
+// StartBoundaryNotFoundDefect: a nested container whose payload carries no
+// boundary delimiter stays a plain string leaf, without the newline strip.
+$t->same([
+    ['file', 'request_body', null, "Multipart field name 'file': "],
+    ['Content-Type: multipart/mixed; boundary=N0', 'request_body:multipart_field', null, "Request body field 'file': "],
+    ["plain nested payload\r\n", 'request_body:multipart_field', null, "Request body field 'file': "],
+], BodyFormScan::multipartScanEntries("--B0\r\nContent-Type: multipart/mixed; boundary=N0\r\n\r\nplain nested payload\r\n--B0--\r\n", MULTIPART_CT, 16), 'a nested container without its start boundary scans as a plain leaf');
+
+// NoBoundaryInMultipartDefect: a nested multipart content type without a
+// boundary parameter stays a plain string leaf.
+$t->same([
+    ['file', 'request_body', null, "Multipart field name 'file': "],
+    ['Content-Type: multipart/mixed', 'request_body:multipart_field', null, "Request body field 'file': "],
+    ["plain nested payload\r\n", 'request_body:multipart_field', null, "Request body field 'file': "],
+], BodyFormScan::multipartScanEntries("--B0\r\nContent-Type: multipart/mixed\r\n\r\nplain nested payload\r\n--B0--\r\n", MULTIPART_CT, 16), 'a nested container without a boundary parameter scans as a plain leaf');
+
+// An empty nested container body has no delimiters at all.
+$t->same([
+    ['file', 'request_body', null, "Multipart field name 'file': "],
+    ['Content-Type: multipart/mixed; boundary=N0', 'request_body:multipart_field', null, "Request body field 'file': "],
+], BodyFormScan::multipartScanEntries("--B0\r\nContent-Type: multipart/mixed; boundary=N0\r\n\r\n--B0--\r\n", MULTIPART_CT, 16), 'an empty nested container contributes no payload value');
+
+// An RFC 2231 extended boundary parameter counts as absent (the Python
+// engine only accepts a plain string boundary).
+$t->same([
+    ['file', 'request_body', null, "Multipart field name 'file': "],
+    ["Content-Type: multipart/mixed; boundary*=utf-8''N0", 'request_body:multipart_field', null, "Request body field 'file': "],
+    ["plain\r\n", 'request_body:multipart_field', null, "Request body field 'file': "],
+], BodyFormScan::multipartScanEntries("--B0\r\nContent-Type: multipart/mixed; boundary*=utf-8''N0\r\n\r\nplain\r\n--B0--\r\n", MULTIPART_CT, 16), 'an RFC 2231 extended boundary counts as absent');
+
+// An empty Content-Type value falls back to the leaf scan.
+$t->same([
+    ['a', 'request_body', null, "Multipart field name 'a': "],
+    ['Content-Type: ', 'request_body:multipart_field', null, "Request body field 'a': "],
+    ['Content-Disposition: form-data; name="a"', 'request_body:multipart_field', null, "Request body field 'a': "],
+    ['body', 'request_body:multipart_field', null, "Request body field 'a': "],
+], BodyFormScan::multipartScanEntries("--B0\r\nContent-Type:\r\nContent-Disposition: form-data; name=\"a\"\r\n\r\nbody\r\n--B0--\r\n", MULTIPART_CT, 16), 'an empty content-type value scans the part as a leaf');
+
+$t->section('multipart headers: python feedparser semantics');
+
+// A non header first line ends the header block and starts the body there.
+$t->same([
+    ['file', 'request_body', null, "Multipart field name 'file': "],
+    ['hello world', 'request_body:multipart_field', null, "Request body field 'file': "],
+], BodyFormScan::multipartScanEntries("--B0\r\nhello world\r\n--B0--\r\n", MULTIPART_CT, 16), 'a non header first line starts the body immediately');
+
+// A continuation line before any header is dropped
+// (FirstHeaderLineIsContinuationDefect).
+$t->same([
+    ['a', 'request_body', null, "Multipart field name 'a': "],
+    ['Content-Disposition: form-data; name="a"', 'request_body:multipart_field', null, "Request body field 'a': "],
+    ['body', 'request_body:multipart_field', null, "Request body field 'a': "],
+], BodyFormScan::multipartScanEntries("--B0\r\n    orphan\r\nContent-Disposition: form-data; name=\"a\"\r\n\r\nbody\r\n--B0--\r\n", MULTIPART_CT, 16), 'an orphan continuation before any header is dropped');
+
+// A folded header value keeps its embedded line break.
+$t->same([
+    ['a', 'request_body', null, "Multipart field name 'a': "],
+    ["Content-Type: text/plain\n  folded part", 'request_body:multipart_field', null, "Request body field 'a': "],
+    ['Content-Disposition: form-data; name="a"', 'request_body:multipart_field', null, "Request body field 'a': "],
+    ['body', 'request_body:multipart_field', null, "Request body field 'a': "],
+], BodyFormScan::multipartScanEntries("--B0\r\nContent-Type: text/plain\n  folded part\nContent-Disposition: form-data; name=\"a\"\r\n\r\nbody\r\n--B0--\r\n", MULTIPART_CT, 16), 'a folded header value keeps the embedded line break');
+
+// A "From " line first in the block is skipped.
+$t->same([
+    ['a', 'request_body', null, "Multipart field name 'a': "],
+    ['Content-Disposition: form-data; name="a"', 'request_body:multipart_field', null, "Request body field 'a': "],
+    ['body', 'request_body:multipart_field', null, "Request body field 'a': "],
+], BodyFormScan::multipartScanEntries("--B0\r\nFrom alice@example.com Sat Jan 01 00:00:00 2026\r\nContent-Disposition: form-data; name=\"a\"\r\n\r\nbody\r\n--B0--\r\n", MULTIPART_CT, 16), 'a From line first in the block is dropped');
+
+// A "From " line last in the block is pushed back into the body, after the
+// consumed blank separator.
+$t->same([
+    ['a', 'request_body', null, "Multipart field name 'a': "],
+    ['Content-Disposition: form-data; name="a"', 'request_body:multipart_field', null, "Request body field 'a': "],
+    ["From alice@example.com Sat Jan 01 00:00:00 2026\r\nthe payload", 'request_body:multipart_field', null, "Request body field 'a': "],
+], BodyFormScan::multipartScanEntries(
+    "--B0\r\nContent-Disposition: form-data; name=\"a\"\r\nFrom alice@example.com Sat Jan 01 00:00:00 2026\r\n\r\nthe payload\r\n--B0--\r\n",
+    MULTIPART_CT,
+    16
+), 'a From line last in the block is pushed back into the body');
+
+// A "From " line in the middle of the block is dropped; the pending header
+// before it is flushed first.
+$t->same([
+    ['a', 'request_body', null, "Multipart field name 'a': "],
+    ['Content-Disposition: form-data; name="a"', 'request_body:multipart_field', null, "Request body field 'a': "],
+    ['X-Other: v', 'request_body:multipart_field', null, "Request body field 'a': "],
+    ['the payload', 'request_body:multipart_field', null, "Request body field 'a': "],
+], BodyFormScan::multipartScanEntries(
+    "--B0\r\nContent-Disposition: form-data; name=\"a\"\r\nFrom alice@example.com Sat Jan 01 00:00:00 2026\r\nX-Other: v\r\n\r\nthe payload\r\n--B0--\r\n",
+    MULTIPART_CT,
+    16
+), 'a From line in the middle of the block is dropped');
+
+// A ": value" line is an InvalidHeaderDefect and is dropped.
+$t->same([
+    ['a', 'request_body', null, "Multipart field name 'a': "],
+    ['Content-Disposition: form-data; name="a"', 'request_body:multipart_field', null, "Request body field 'a': "],
+    ['the payload', 'request_body:multipart_field', null, "Request body field 'a': "],
+], BodyFormScan::multipartScanEntries("--B0\r\nContent-Disposition: form-data; name=\"a\"\r\n: bad\r\n\r\nthe payload\r\n--B0--\r\n", MULTIPART_CT, 16), 'a colon-first line is dropped as an invalid header');
+
+// A header name with a non-printable-ASCII character is not a header line.
+$t->same([
+    ['file', 'request_body', null, "Multipart field name 'file': "],
+    ['bad name: x', 'request_body:multipart_field', null, "Request body field 'file': "],
+], BodyFormScan::multipartScanEntries("--B0\r\nbad name: x\r\n--B0--\r\n", MULTIPART_CT, 16), 'a header name with a space is body text');
+
+$t->section('multipart parameters: RFC 2231 continuations and escapes');
+
+// Plain continuations join without the extended tuple shape.
+$t->same(true, in_array('filename="abcd"', dispEntries('Content-Disposition: form-data; filename*0="ab"; filename*1="cd"'), true), 'plain continuations join without a tuple');
+// Encoded plus plain continuations percent-decode the starred segments.
+$t->same(true, in_array('filename="abcd"', dispEntries("Content-Disposition: form-data; filename*0*=us-ascii%27%27ab; filename*1=\"cd\""), true), 'starred continuations percent-decode and join');
+// A single starred segment without ticks has no charset and no language.
+$t->same(true, in_array('filename="ab"', dispEntries("Content-Disposition: form-data; filename*=ab"), true), 'a starred segment without ticks decodes with no charset');
+// A full extended parameter splits into charset, language, and text, and
+// the display value is the python tuple repr.
+$t->same(true, 
+    in_array("('us-ascii', '', 'hello world')", dispEntries("Content-Disposition: form-data; name*0*=us-ascii%27%27hello%20world"), true),
+    'an extended name parameter reports the python tuple repr'
+);
+// An apostrophe in the text switches the repr to double quotes.
+$t->same(true, 
+    in_array('(\'iso-8859-1\', \'\', "o\'brien")', dispEntries("Content-Disposition: form-data; name*0*=iso-8859-1%27%27o%27brien"), true),
+    'an apostrophe in the text switches the repr to double quotes'
+);
+// An unknown charset keeps the already-unquoted text (LookupError path).
+$t->same(true, in_array('filename="hello"', dispEntries("Content-Disposition: form-data; filename*=bogus-cs%27%27hello"), true), 'an unknown charset keeps the unquoted text');
+// No charset ticks at all plus a high byte: us-ascii replace.
+$t->same(true, in_array("filename=\"A" . "\u{FFFD}" . "B\"", dispEntries("Content-Disposition: form-data; filename*=%41%ff%42"), true), 'a high byte without a charset becomes a replacement character');
+// A bare (unnumbered) segment is dropped when a zero segment exists.
+$t->same(true, in_array('filename="ab"', dispEntries("Content-Disposition: form-data; filename*0*=us-ascii%27%27ab; filename*=\"Z\""), true), 'a bare segment is dropped when a zero segment exists');
+// A continuation group for another parameter does not answer the target.
+$t->same(true, 
+    in_array("('us-ascii', '', 'nm')", dispEntries("Content-Disposition: form-data; name*0*=us-ascii%27%27nm; filename*=us-ascii%27%27fx.txt"), true),
+    'a continuation group for another parameter is skipped'
+);
+// Quoted-pair escapes inside a quoted value.
+$t->same(true, in_array('a"b;c', dispEntries('Content-Disposition: form-data; name="a\\"b;c"'), true), 'an escaped quote inside a quoted name does not split the parameter');
+$t->same(true, in_array('a\\b;c', dispEntries('Content-Disposition: form-data; name="a\\\\b;c"'), true), 'an escaped backslash survives the unquote');
+// A quote or backslash inside a continuation value is re-escaped RFC 2822
+// style and unescaped by the final unquote; filename entries strip quotes.
+$t->same(true, in_array('filename="ab"', dispEntries("Content-Disposition: form-data; filename*=us-ascii%27%27a%22b"), true), 'a quote in a continuation value is sanitized out of the filename');
+$t->same(true, 
+    in_array('(\'us-ascii\', \'\', \'a"b\')', dispEntries("Content-Disposition: form-data; name*0*=us-ascii%27%27a%22b"), true),
+    'a quote in the text is re-escaped in the tuple repr'
+);
+$t->same(true, 
+    in_array('(\'us-ascii\', \'\', \'a\\\\b\')', dispEntries("Content-Disposition: form-data; name*0*=us-ascii%27%27a%5cb"), true),
+    'a backslash in the text is re-escaped in the tuple repr'
+);
+
+$t->section('urlencoded pairs: parse quirks');
+
+$t->same([['a', 'request_body', null, "Form field name 'a': "], ['1', 'request_body:form_field', null, "Request body field 'a': "]], BodyFormScan::bodyScanEntries('a=1&&', FORM_CT, 16), 'an empty segment produces no pair');
+$t->same([['k ey', 'request_body', null, "Form field name 'k ey': "], ['v%2', 'request_body:form_field', null, "Request body field 'k ey': "]], BodyFormScan::bodyScanEntries('k+ey=v%2', FORM_CT, 16), 'plus decodes to a space and an invalid escape stays raw');
 
 echo "\npassed={$t->passed} failed={$t->failed}\n";
 exit($t->failed === 0 ? 0 : 1);

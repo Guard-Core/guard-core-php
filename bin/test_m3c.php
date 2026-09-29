@@ -3,6 +3,7 @@
 declare(strict_types=1);
 
 use RenzoFranceschini\GuardCore\Config\SecurityConfig;
+use RenzoFranceschini\GuardCore\GeoIp\CountryResolver;
 use RenzoFranceschini\GuardCore\Logging\LogActivity;
 use RenzoFranceschini\GuardCore\Logging\LogRedactor;
 use RenzoFranceschini\GuardCore\Logging\SimpleRequestLogger;
@@ -366,6 +367,77 @@ $t->throws(static fn () => new SecurityConfig(blockCloudProviders: [5]), Invalid
 $t->throws(static fn () => (new SecurityConfig())->with(['definitely_not_a_field' => 1]), InvalidArgumentException::class, 'unknown config field rejected');
 $t->throws(static fn () => new SecurityConfig(threatBanConfig: ['xss' => ['threshold' => 1]]), InvalidArgumentException::class, 'threat ban config missing duration rejected');
 $t->throws(static fn () => new SecurityConfig(endpointRateLimits: ['/x' => ['limit' => 5]]), InvalidArgumentException::class, 'endpoint rate limit missing window rejected');
+
+$t->section('config: country lists and geo warnings');
+
+$nullResolver = new class implements CountryResolver {
+    public function getCountry(string $ip): ?string
+    {
+        return null;
+    }
+};
+
+// The reference warns (not errors) when the whitelist shadows the
+// blocklist; the warning rides error_log. Capture it to a temp file.
+$errorLogTarget = tempnam(sys_get_temp_dir(), 'guardcfg');
+$previousLog = ini_set('error_log', $errorLogTarget);
+$warned = new SecurityConfig(blockedCountries: ['CN'], whitelistCountries: ['US'], geoIpHandler: $nullResolver);
+if ($previousLog !== false) {
+    ini_set('error_log', $previousLog);
+}
+$t->same(['US'], $warned->whitelistCountries, 'a whitelisted country list is kept');
+$t->same(['CN'], $warned->blockedCountries, 'the shadowed blocklist is still stored');
+$t->truthy(str_contains((string) file_get_contents($errorLogTarget), 'blocked_countries is ignored'), 'the shadowed blocklist warning rides error_log');
+unlink($errorLogTarget);
+
+$t->throws(
+    static fn () => new SecurityConfig(blockedCountries: ['CN', 3], geoIpHandler: $nullResolver),
+    InvalidArgumentException::class,
+    'a non string country entry is rejected'
+);
+
+$t->section('config: more validation edges');
+
+$t->throws(
+    static fn () => new SecurityConfig(threatBanConfig: ['xss' => ['threshold' => 'high', 'duration' => 60]]),
+    InvalidArgumentException::class,
+    'a non int threat ban threshold is rejected'
+);
+$t->same(['xss' => ['threshold' => 3, 'duration' => 600]], (new SecurityConfig(threatBanConfig: ['xss' => ['threshold' => 3, 'duration' => 600]]))->threatBanConfig, 'a valid threat ban config is kept');
+$t->throws(
+    static fn () => new SecurityConfig(endpointRateLimits: ['/api' => ['limit' => 'five', 'window' => 60]]),
+    InvalidArgumentException::class,
+    'a non int endpoint rate limit is rejected'
+);
+$t->same(['/api' => ['limit' => 5, 'window' => 60]], (new SecurityConfig(endpointRateLimits: ['/api' => ['limit' => 5, 'window' => 60]]))->endpointRateLimits, 'a valid endpoint rate limit is kept');
+$t->throws(
+    static fn () => new SecurityConfig(enabledDetectionCategories: ['nope']),
+    InvalidArgumentException::class,
+    'an unknown detection category is rejected'
+);
+$t->throws(
+    static fn () => new SecurityConfig(enabledDetectionCategories: [3]),
+    InvalidArgumentException::class,
+    'a non string detection category is rejected'
+);
+$t->throws(
+    static fn () => new SecurityConfig(excludePaths: [3]),
+    InvalidArgumentException::class,
+    'a non string exclude path is rejected'
+);
+$t->throws(
+    static fn () => new SecurityConfig(logSensitiveHeaders: [3]),
+    InvalidArgumentException::class,
+    'a non string sensitive header is rejected'
+);
+$t->same(['authorization' => true, 'x-secret' => true], (new SecurityConfig(logSensitiveHeaders: ['Authorization', 'X-Secret']))->logSensitiveHeaders, 'sensitive header names lower into the set');
+
+$t->section('config: url path normalization edges');
+
+$t->same('/a/b', SecurityConfig::normalizeUrlPath('/a/;/b'), 'a bare parameter segment drops out');
+$t->same('/a', SecurityConfig::normalizeUrlPath('/a/;'), 'a trailing parameter-only segment drops out');
+$t->same(null, SecurityConfig::normalizeUrlPath('/..'), 'a traversal above the root is rejected');
+$t->same(null, SecurityConfig::normalizeUrlPath('%ED%B2%80'), 'a path decoding to invalid utf-8 is rejected');
 
 $t->section('redaction: remaining url edges');
 

@@ -10,8 +10,11 @@
 declare(strict_types=1);
 
 use RenzoFranceschini\GuardCore\Detection\Base64;
+use RenzoFranceschini\GuardCore\Detection\Matchers;
 use RenzoFranceschini\GuardCore\Detection\Preprocessor;
 use RenzoFranceschini\GuardCore\Detection\Semantic;
+use RenzoFranceschini\GuardCore\GeoIp\MmdbDecoder;
+use RenzoFranceschini\GuardCore\GeoIp\MmdbError;
 use RenzoFranceschini\GuardCore\Ip\CanonicalIp;
 use RenzoFranceschini\GuardCore\Detection\LdapIpv4;
 use RenzoFranceschini\GuardCore\Detection\Pickle;
@@ -364,6 +367,118 @@ $t->ok(!CanonicalIp::isLoopback('8.8.8.8'), 'public v4 is not loopback');
 $t->ok(!CanonicalIp::isLoopback('2001:db8::1'), 'public v6 is not loopback');
 $t->ok(CanonicalIp::parse('[2001:db8::1]') !== null, 'bracketed ipv6 parses');
 $t->ok(CanonicalIp::parse('nope') === null, 'garbage does not parse');
+
+$t->section('matchers: alternations and bounded windows');
+
+// The com-free dangerous alternation drops the com entry only.
+$t->ok(!preg_match('#(^|\|)com(\||$)#', Matchers::dangerousExtAlternation(false)), 'the com-free alternation drops com');
+$t->ok(preg_match('#(^|\|)com(\||$)#', Matchers::dangerousExtAlternation(true)) === 1, 'the full alternation keeps com');
+$t->ok(Matchers::dangerousExtAlternation(false) !== Matchers::dangerousExtAlternation(true), 'the two alternations differ');
+
+// A prefix that starts after the last terminator scans nothing.
+$t->same([], Matchers::loadFileScanMatches('x) LOAD_FILE(', 'LOAD_FILE\\s*\\('), 'a prefix after the last terminator scans nothing');
+
+$shellSrc = "\\n[^\\S\\r\\n]*(?:[^=\\s;|&]+=[^\\s;|&]+\\s+)*(?:/?(?:[\\w.-]+/)*env\\s+)?/?(?:[\\w.-]+/)*(?:bash|sh|ksh|csh|tsch|zsh|ash)\\s+-c\\b";
+$shellHits = Matchers::cmdInjectionShellDashCFinditer("\nFOO=bar bash -c 'id'", $shellSrc);
+$t->same(1, count($shellHits), 'a shell dash c line with env assignments matches once');
+$t->same("\nFOO=bar bash -c", $shellHits[0]['text'] ?? null, 'the shell dash c match spans the env line and the interpreter');
+$plainShell = Matchers::cmdInjectionShellDashCFinditer("\n  sh -c 'id'", $shellSrc);
+$t->same(1, count($plainShell), 'a plain shell dash c line matches once');
+
+$t->section('matchers: ldap null byte attribute');
+
+$ldapRaw = "[a-zA-Z][\\w-]*\\s*=[\\d\\w\\s]*\\*\\)+(?:%00|\\\\u0000|\\\\x00|\\\\0|\\x00)";
+$ldapTail = '\\*\\)+(?:%00|\\\\u0000|\\\\x00|\\\\0|\\x00)';
+$ldapDecoded = "[a-zA-Z][\\w-]*\\s*=[\\d\\w\\s]*\\*\\)+\\x00";
+
+$hit = Matchers::ldapNullByteAttrFinditer('cn=x*)%00', $ldapRaw, $ldapTail);
+$t->same(1, count($hit), 'a raw null byte ldap attribute matches');
+$t->same('cn=x*)%00', $hit[0]['text'] ?? null, 'the raw null byte match spans the attribute');
+$t->same([], Matchers::ldapNullByteAttrFinditer('(uid=admin*)(cn=a%00', $ldapRaw, $ldapTail), 'a star without the closing paren tail does not match');
+$t->same([], Matchers::ldapNullByteAttrFinditer('9=x*)%00', $ldapRaw, $ldapTail), 'a non letter attribute name does not match');
+$t->same([], Matchers::ldapNullByteAttrFinditer('cn: x*)%00', $ldapRaw, $ldapTail), 'a value not preceded by equals does not match');
+$decodedHit = Matchers::ldapNullByteAttrFinditer("cn=zz*)\x00", $ldapDecoded, '\\*\\)+\\x00');
+$t->same(1, count($decodedHit), 'a decoded null byte ldap attribute matches');
+$multiHit = Matchers::ldapNullByteAttrFinditer("c\xc3\xa9n=zz*)\x00", $ldapDecoded, '\\*\\)+\\x00');
+$t->same(1, count($multiHit), 'the attribute walk steps over multi byte characters');
+$t->same("c\xc3\xa9n=zz*)\x00", $multiHit[0]['text'] ?? null, 'the multi byte match keeps the whole attribute');
+
+$t->section('matchers: pickle global scan');
+
+$pk = "(c[A-Za-z_][A-Za-z0-9_]{0,100}(?:\\.[A-Za-z_][A-Za-z0-9_]{0,100}){0,20}\\n[A-Za-z_][A-Za-z0-9_]{0,100}\\n)[^ \\t]{0,100}?[Rb]";
+$upper = Matchers::pickleGlobalGenericFinditer("\nCposix\nsystem\nR", $pk);
+$t->same(1, count($upper), 'an uppercase global marker matches');
+$t->same("Cposix\nsystem\nR", $upper[0]['text'] ?? null, 'the uppercase global match spans the opcode stream');
+$dotted = Matchers::pickleGlobalGenericFinditer("cos.system\nzz\nR", $pk);
+$t->same(1, count($dotted), 'a dotted module global matches');
+$t->same(0, $dotted[0]['start'] ?? -1, 'the dotted global starts at the marker');
+$t->same([], Matchers::pickleGlobalGenericFinditer("c1\nzz\n", $pk), 'a marker followed by a digit is not a global');
+
+$t->section('matchers: template expressions');
+
+$curlyHits = Matchers::templateExpressionMatches('{{ 2024-01-01 {{ 7*6 }} }}', '(?<!\\d)[\'\\"]?\\d+[\'\\"]?\\s*[*/%+\\-]\\s*[\'\\"]?\\d+[\'\\"]?', 'curly');
+$t->same(1, count($curlyHits), 'an expression after an embedded date still matches');
+$t->same('{{ 7*6 }}', $curlyHits[0]['text'] ?? null, 'the date shifts the frame to the inner expression');
+$t->same([], Matchers::templateExpressionMatches('{{ 2024-01-01 7*6 }}', '(?<!\\d)[\'\\"]?\\d+[\'\\"]?\\s*[*/%+\\-]\\s*[\'\\"]?\\d+[\'\\"]?', 'curly'), 'a date without a following opening stops the region');
+
+$kwHits = Matchers::templateKeywordMatches('{{ system }}', 'system', '{{', '}}');
+$t->same(1, count($kwHits), 'a template keyword region matches');
+$t->same('{{ system }}', $kwHits[0]['text'] ?? null, 'the keyword frame spans the whole tag');
+
+$t->section('matchers: file upload filename parsing');
+
+$t->same([], Matchers::fileUploadScanMatches('x  filename="a.exe"', 'file_upload_dangerous'), 'a filename token without a delimiter prefix does not match');
+$t->same([], Matchers::fileUploadScanMatches('filename x', 'file_upload_dangerous'), 'a filename token without equals does not match');
+$t->same([], Matchers::fileUploadScanMatches('filename=abc', 'file_upload_dangerous'), 'a filename without a quote does not match');
+$t->same([], Matchers::fileUploadScanMatches('filename="abc', 'file_upload_dangerous'), 'an unclosed filename quote does not match');
+$spaced = Matchers::fileUploadScanMatches('filename = "a.exe"', 'file_upload_dangerous');
+$t->same(1, count($spaced), 'spaces around the filename equals still parse');
+$t->same('filename = "a.exe"', $spaced[0]['text'] ?? null, 'the spaced filename match spans the assignment');
+$newlinePrefix = Matchers::fileUploadScanMatches("x\n \nfilename=\"a.exe\"", 'file_upload_dangerous');
+$t->same(1, count($newlinePrefix), 'a newline space run before the filename anchors the match');
+
+$t->same([], Matchers::fileUploadScanMatches('filename="a.exe"', 'file_upload_double'), 'a dangerous terminal extension is not a double extension');
+$t->same([], Matchers::fileUploadScanMatches('filename=".exephp.jpg"', 'file_upload_double'), 'a glued dangerous extension with a letter lookahead is not double');
+$interposed = Matchers::fileUploadScanMatches('filename="x.php.txt.jpg"', 'file_upload_double');
+$t->same(1, count($interposed), 'a dangerous extension before a benign chain is double');
+$directDouble = Matchers::fileUploadScanMatches('filename="x.php.jpg"', 'file_upload_double');
+$t->same(1, count($directDouble), 'a dangerous extension directly before the benign terminal is double');
+$trunc = Matchers::fileUploadScanMatches('filename="a.php%00"', 'file_upload_truncation');
+$t->same(1, count($trunc), 'a percent encoded null after a dangerous extension is truncation');
+$decTrunc = Matchers::fileUploadScanMatches("filename=\"a.php\x00\"", 'file_upload_decoded_truncation');
+$t->same(1, count($decTrunc), 'a raw null after a dangerous extension is decoded truncation');
+$t->same(false, Matchers::fileUploadKindMatches('a.exe', 'unknown_kind'), 'an unknown upload kind matches nothing');
+
+$t->section('pickle vm: remaining opcode coverage');
+
+$t->ok(!Pickle::globalPrefixIsOpcodeStream('S'), 'a string opcode without a newline is a short read');
+$t->ok(!Pickle::globalPrefixIsOpcodeStream('e'), 'an append without a mark fails');
+$t->ok(Pickle::globalPrefixIsOpcodeStream("M\x00\x00."), 'the two byte integer opcode walks');
+$t->ok(Pickle::globalPrefixIsOpcodeStream("J\x00\x00\x00\x00."), 'the four byte integer opcode walks');
+$t->ok(Pickle::globalPrefixIsOpcodeStream("j\x00\x00\x00\x00."), 'the long binput opcode walks');
+$t->ok(Pickle::globalPrefixIsOpcodeStream("\u{0080}\x03."), 'the proto frame opcode reads one byte');
+$t->ok(Pickle::globalPrefixIsOpcodeStream("h\x00."), 'the short stack index opcode pushes an object');
+$t->ok(Pickle::globalPrefixIsOpcodeStream("\u{0081}."), 'the short binunicode opcode pushes an object');
+$t->ok(Pickle::globalPrefixIsOpcodeStream("\u{008d}\x02\x00\x00\x00\x00\x00\x00\x00ab."), 'the byte array opcode reads its packed length');
+$t->ok(Pickle::globalPrefixIsOpcodeStream("\u{008e}\x02."), 'the frame opcode reads one byte');
+$t->ok(Pickle::globalPrefixIsOpcodeStream("\u{0085}\x00\x00\x00\x00\x00\x00\x00\x00\x00K"), 'the tuple-one frame opcode is consumed by the walk loop');
+$t->ok(Pickle::globalPrefixIsOpcodeStream("\u{0095}\x00\x00\x00\x00\x00\x00\x00\x00\x00K"), 'the frame opcode is consumed by the walk loop');
+
+$t->section('mmdb decoder: primitive types');
+
+$dec = static fn (string $bytes): mixed => (new MmdbDecoder($bytes, 0))->decode();
+
+$t->same('wor', $dec("\x20\x02\x53wor"), 'a pointer follows to the aliased string');
+$t->same(str_repeat('q', 40), $dec("\x5d\x00" . str_repeat('q', 40)), 'a size 29 string reads its extended width');
+$t->same(str_repeat('r', 300), $dec("\x5e\x01\x2c" . str_repeat('r', 300)), 'a size 30 string reads two width bytes');
+$t->same(1.5, $dec("\x68" . pack('E', 1.5)), 'a double decodes big endian');
+$t->same(1.5, $dec("\x00\x44" . pack('G', 1.5)), 'a float decodes big endian');
+$t->same(-1, $dec("\x00\x0c" . pack('N', 0xFFFFFFFF)), 'an int32 sign extends the high bit');
+$t->same(true, $dec("\x00\x39"), 'a boolean with size one is true');
+$t->same(false, $dec("\x00\x38"), 'a boolean with size zero is false');
+$t->throws(MmdbError::class, static fn () => $dec("\x00\x28"), 'an unsupported extended type raises an error');
+$t->throws(MmdbError::class, static fn () => $dec("\x00"), 'a truncated extended marker raises an error');
+$t->throws(MmdbError::class, static fn () => $dec("\x20\xff"), 'a pointer past the buffer raises an error');
 
 $total = $t->passed + $t->failed;
 echo "\nPassed: {$t->passed}, Failed: {$t->failed}\n";
