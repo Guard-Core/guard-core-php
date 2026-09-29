@@ -620,22 +620,29 @@ $t->section('pipeline: emergency mode and https enforcement edges');
 $emConfig = new SecurityConfig();
 $emCheck = new RenzoFranceschini\GuardCore\Pipeline\Checks\EmergencyModeCheck($emConfig, new GuardResponseFactory());
 $t->same(null, $emCheck->check(makeRequest()), 'an engine without emergency mode scans nothing');
-$emConfigOn = new SecurityConfig(emergencyMode: true);
+$emConfigOn = new SecurityConfig(emergencyMode: true, emergencyWhitelist: ['9.9.9.9']);
 $emCheckOn = new RenzoFranceschini\GuardCore\Pipeline\Checks\EmergencyModeCheck($emConfigOn, new GuardResponseFactory());
 $emRequest = makeRequest();
 $t->same(null, $emCheckOn->check($emRequest), 'an emergency whitelist pass keeps going');
 $emHit = makeRequest(ip: '1.2.3.4');
-$t->same(403, $emCheckOn->check($emHit)?->statusCode(), 'an emergency mode block denies');
+$t->same(503, $emCheckOn->check($emHit)?->statusCode(), 'an emergency mode block denies with a 503');
+$emUnknown = new SimpleGuardRequest(urlPath: '/');
+$t->same(503, $emCheckOn->check($emUnknown)?->statusCode(), 'an emergency block applies to unknown clients too');
 
-// Https enforcement: without trust in x-forwarded-proto the https answer is no.
-$httpsConfig = new SecurityConfig(trustXForwardedProto: false);
-$httpsCheck = new RenzoFranceschini\GuardCore\Pipeline\Checks\HttpsEnforcementCheck($httpsConfig, new GuardResponseFactory());
+// Https enforcement: a route requiring https with an untrusted proxy stays
+// on http and the x-forwarded-proto header is not believed.
+$httpsRoute = new RouteConfig(requireHttps: true);
+$httpsCheck = new RenzoFranceschini\GuardCore\Pipeline\Checks\HttpsEnforcementCheck(new SecurityConfig(trustXForwardedProto: false), new GuardResponseFactory());
 $httpsRequest = makeRequest(headers: ['x-forwarded-proto' => 'https']);
-$t->same(false, $httpsCheck->check($httpsRequest), 'the https check returns a response');
-$httpsTrusted = new SecurityConfig(trustXForwardedProto: true, trustedProxies: ['10.0.0.0/8']);
-$httpsCheckTrusted = new RenzoFranceschini\GuardCore\Pipeline\Checks\HttpsEnforcementCheck($httpsTrusted, new GuardResponseFactory());
+$httpsRequest->state()->routeConfig = $httpsRoute;
+$t->same(301, $httpsCheck->check($httpsRequest)?->statusCode(), 'an http route requirement redirects to https without trusting the header');
+$httpsNotTrusted = new RenzoFranceschini\GuardCore\Pipeline\Checks\HttpsEnforcementCheck(new SecurityConfig(trustXForwardedProto: true, trustedProxies: ['10.0.0.0/8']), new GuardResponseFactory());
 $untrustedRequest = makeRequest(ip: '9.9.9.9', headers: ['x-forwarded-proto' => 'https']);
-$t->same(false, $httpsCheckTrusted->check($untrustedRequest), 'the https check returns a response for an untrusted proxy');
+$untrustedRequest->state()->routeConfig = $httpsRoute;
+$t->same(301, $httpsNotTrusted->check($untrustedRequest)?->statusCode(), 'an untrusted proxy never upgrades the scheme');
+$untrustedRequest->state()->routeConfig = $httpsRoute;
+$httpsNotTrusted2 = new RenzoFranceschini\GuardCore\Pipeline\Checks\HttpsEnforcementCheck(new SecurityConfig(trustXForwardedProto: true, trustedProxies: ['10.0.0.0/8'], passiveMode: true), new GuardResponseFactory());
+$t->same(null, $httpsNotTrusted2->check($untrustedRequest), 'a passive https requirement hooks instead of redirecting');
 
 $t->section('pipeline: sensitive query values are redacted from error logs');
 
