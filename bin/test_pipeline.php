@@ -601,6 +601,20 @@ $t->same(null, $byName['referrer']->check($refRequest2), 'a disallowed referrer 
 $t->same(true, in_array('Missing referrer header', $accessorHook, true), 'the missing referrer hook fired');
 $t->same(true, (bool) array_filter($accessorHook, static fn (string $r): bool => str_starts_with($r, 'Invalid referrer:')), 'the invalid referrer hook fired');
 
+// A hostless referrer is never an allowed domain (passive hook fires).
+$hostlessRequest = makeRequest(path: '/r', headers: ['referer' => 'not-a-url']);
+$hostlessRequest->state()->clientIp = '9.9.9.9';
+$hostlessRequest->state()->routeConfig = new RouteConfig(requireReferrer: ['good.example']);
+$t->same(null, $byName['referrer']->check($hostlessRequest), 'a hostless referrer in passive mode passes with a hook');
+$t->same(true, (bool) array_filter($accessorHook, static fn (string $r): bool => str_starts_with($r, 'Invalid referrer: not-a-url')), 'the hostless referrer hook fired');
+
+// An oversized body in passive mode hooks instead of denying.
+$sizePassiveRequest = makeRequest(path: '/big', headers: ['content-length' => '200']);
+$sizePassiveRequest->state()->clientIp = '9.9.9.9';
+$sizePassiveRequest->state()->routeConfig = new RouteConfig(maxRequestSize: 10);
+$t->same(null, $byName['request_size_content']->check($sizePassiveRequest), 'an oversized body in passive mode passes with a hook');
+$t->same(true, (bool) array_filter($accessorHook, static fn (string $r): bool => str_contains($r, 'Request size 200 exceeds limit: 10')), 'the oversized body hook fired');
+
 // A route requiring authentication without a header denies with the message.
 $authRequest = makeRequest(path: '/a');
 $authRequest->state()->clientIp = '9.9.9.9';

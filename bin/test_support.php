@@ -703,7 +703,7 @@ $t->same(1, count(XmlXxe::xmlXxePublicExternalDtdFinditer('<!DOCTYPE r [<!ENTITY
 $t->section('semantic, base64, islands, and shell validator edges');
 
 $t->ok(is_array(Semantic::analyze("\xC2\x80")), 'an overlong two byte sequence analyzes');
-$t->ok(is_array(Semantic::extractSuspiciousPatterns(str_repeat('abcdefgh(', 3000))), 'special pattern extraction caps its scan');
+$t->ok(is_array(Semantic::extractSuspiciousPatterns(str_repeat('abcdefgh(', 6000))), 'special pattern extraction caps its scan');
 $t->ok(is_array(Semantic::analyze('\\u0041')), 'a unicode escape adds a layer');
 $t->same(false, Semantic::detectObfuscation(str_repeat("\x00", 200)), 'binary content is never obfuscation');
 
