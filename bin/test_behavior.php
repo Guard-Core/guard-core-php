@@ -622,8 +622,22 @@ $activeTracker = new BehaviorTracker(new SecurityConfig(enableRedis: false), nul
 $activeTracker->applyAction(new BehaviorRule('usage', 1, action: 'ban'), '10.10.0.3', 'GET:/x', 'no-ban-manager');
 $t->same(true, true, 'an active ban without a ban manager is a no-op');
 
-// The config drops invalid global behavior rules silently.
-$invalidGlobal = new SecurityConfig(globalBehaviorRules: [['rule_type' => 'usage', 'threshold' => 1, 'pattern' => 'x']]);
-$t->same([], array_keys($invalidGlobal->globalBehaviorRules), 'a pattern on a usage rule is dropped');
+// A usage rule with a pattern is unaffected by the scan-flag validation.
+$patternUsage = new SecurityConfig(globalBehaviorRules: [['rule_type' => 'usage', 'threshold' => 1, 'pattern' => 'x']]);
+$t->same(1, count($patternUsage->globalBehaviorRules), 'a usage rule with a pattern is kept');
+$t->throws(
+    static fn () => new SecurityConfig(globalBehaviorRules: [['rule_type' => 'return_pattern', 'threshold' => 1, 'pattern' => 'denied', 'action' => 'log']]),
+    InvalidArgumentException::class,
+    'would never match',
+    'a body return pattern without the scan flag is rejected'
+);
+// A status pattern rule does not require the scan flag.
+$statusGlobal = new SecurityConfig(globalBehaviorRules: [['rule_type' => 'return_pattern', 'threshold' => 2, 'pattern' => 'status:404', 'action' => 'log']]);
+$t->same(1, count($statusGlobal->globalBehaviorRules), 'a status return pattern rule survives without the scan flag');
+
+$t->section('tracker: json array guard on a flat field');
+
+$flatTracker = new BehaviorTracker(new SecurityConfig(enableRedis: false, behaviorScanResponseBody: true), null, null);
+$t->same([false, true], $flatTracker->checkResponsePattern($factory->createResponse('{"errors": "flat"}', 200), 'json:errors[]==denied'), 'a flat field under an array pattern is a mismatch');
 
 exit($t->done('test_behavior'));

@@ -10,7 +10,9 @@
 declare(strict_types=1);
 
 use RenzoFranceschini\GuardCore\Detection\Base64;
+use RenzoFranceschini\GuardCore\Detection\BinaryIslands;
 use RenzoFranceschini\GuardCore\Detection\BinaryPrefix;
+use RenzoFranceschini\GuardCore\Detection\JsonWalk;
 use RenzoFranceschini\GuardCore\Detection\Matchers;
 use RenzoFranceschini\GuardCore\Detection\Preprocessor;
 use RenzoFranceschini\GuardCore\Detection\Semantic;
@@ -697,6 +699,30 @@ $t->same(1, count(XmlXxe::xmlXxePublicExternalDtdFinditer('<!DOCTYPE r PUBLIC "-
 $t->same([], XmlXxe::xmlXxePublicExternalDtdFinditer('junk PUBLIC "-//A//EN" "https://d.example.com/x">'), 'a public without a doctype in its run never matches');
 $t->same(1, count(XmlXxe::xmlXxePublicExternalDtdFinditer('<!DOCTYPE a PUBLIC "https://valid.example.com/x"> blah <!DOCTYPE b PUBLIC "-//A//EN" oops>')), 'a public whose run carries no quoted url contributes nothing');
 $t->same(1, count(XmlXxe::xmlXxePublicExternalDtdFinditer('<!DOCTYPE r [<!ENTITY c>]><!DOCTYPE s PUBLIC "-//X//EN" "https://download.example.com/x.dtd">')), 'a run boundary scan skips earlier markup');
+
+$t->section('semantic, base64, islands, and shell validator edges');
+
+$t->ok(is_array(Semantic::analyze("\xC2\x80")), 'an overlong two byte sequence analyzes');
+$t->ok(is_array(Semantic::extractSuspiciousPatterns(str_repeat('abcdefgh(', 3000))), 'special pattern extraction caps its scan');
+$t->ok(is_array(Semantic::analyze('\\u0041')), 'a unicode escape adds a layer');
+$t->same(false, Semantic::detectObfuscation(str_repeat("\x00", 200)), 'binary content is never obfuscation');
+
+$hexFlag = [false];
+$t->same('0xDEADBEEF', Base64::decodeCandidates('0xDEADBEEF', $hexFlag, 65536), 'a hex literal token is left alone by the candidate decoder');
+
+$islands = BinaryIslands::extractBinaryIslands(str_repeat("\x01", 40) . "\xC2\x80" . str_repeat("\x01", 40), 16);
+$t->ok(is_array($islands), 'an overlong two byte sequence inside noise does not crash island extraction');
+
+$t->same(true, ShellValidators::gluedBacktickPairIsInjection('zz`abc`;def more', ['start' => 2, 'end' => 7, 'text' => '`abc`', 'groups' => []], 'request_body'), 'a command following the pair window is injection');
+$t->same(false, ShellValidators::dollarSubstitutionPairIsInjection('SELECT${x}FROM', ['start' => 6, 'end' => 10, 'text' => '${x}', 'groups' => []], 'request_body'), 'a substitution glued to sql keywords is not injection');
+
+$t->same(1, count(XmlXxe::xmlXxePublicExternalDtdFinditer('<!DOCTYPE r PUBLIC "-//A//EN" PUBLIC "https://d.com/x">')), 'a public keyword inside a matched span is skipped');
+
+$deepArray = str_repeat('[', 40) . json_encode('x') . str_repeat(']', 40);
+$arrayEntries = JsonWalk::walkEntries(JsonWalk::parse($deepArray), 'request_body');
+$t->same(1, count($arrayEntries), 'a deep array chain serializes compactly at the cap');
+
+$t->section('support text and unicode edges');
 
 $t->section('support text and unicode edges');
 
