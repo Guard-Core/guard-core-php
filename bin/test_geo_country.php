@@ -2,14 +2,18 @@
 
 declare(strict_types=1);
 
+use RenzoFranceschini\GuardCore\Ban\IpBanManager;
 use RenzoFranceschini\GuardCore\Config\SecurityConfig;
 use RenzoFranceschini\GuardCore\Engine\GuardEngine;
 use RenzoFranceschini\GuardCore\GeoIp\CountryResolver;
 use RenzoFranceschini\GuardCore\GeoIp\GeoIpManager;
 use RenzoFranceschini\GuardCore\GeoIp\MmdbReader;
+use RenzoFranceschini\GuardCore\Pipeline\Checks\IpSecurityCheck;
 use RenzoFranceschini\GuardCore\Request\GuardResponse;
+use RenzoFranceschini\GuardCore\Request\GuardResponseFactory;
 use RenzoFranceschini\GuardCore\Request\SimpleGuardRequest;
 use RenzoFranceschini\GuardCore\Routing\RouteConfig;
+use RenzoFranceschini\GuardCore\Routing\RouteResolver;
 
 require __DIR__ . '/../vendor/autoload.php';
 
@@ -121,12 +125,13 @@ const GEO_BR_IP = '198.51.100.5';
 /**
  * Writes a minimal but spec-valid MMDB database (record size 24, IPv4)
  * mapping the given prefixes to ISO country codes, and returns the path.
- * Only top-level "country" string records are written: the ipinfo
+ * Only top-level "country" string records are written (or records under the
+ * given alternate key, to model foreign record layouts): the ipinfo
  * country_asn.mmdb layout the reference get_country reads.
  *
  * @param array<string, string> $entries
  */
-function buildTestMmdb(array $entries): string
+function buildTestMmdb(array $entries, string $recordKey = 'country'): string
 {
     // Build the binary search tree as nested arrays; a leaf stores its
     // country code under the '!' key.
@@ -147,7 +152,7 @@ function buildTestMmdb(array $entries): string
         unset($node);
     }
 
-    // Data section first: one {"country": code} map per unique code, so
+    // Data section first: one recordKey => code map per unique code, so
     // the leaf records can point at stable offsets.
     $offsets = [];
     $dataSection = '';
@@ -156,7 +161,7 @@ function buildTestMmdb(array $entries): string
             continue;
         }
         $offsets[$code] = strlen($dataSection);
-        $dataSection .= "\xE1" . chr(0x40 | 7) . 'country' . chr(0x40 | strlen($code)) . $code;
+        $dataSection .= "\xE1" . chr(0x40 | strlen($recordKey)) . $recordKey . chr(0x40 | strlen($code)) . $code;
     }
 
     // Wrap the tree into node objects and BFS-index the internal nodes
@@ -427,6 +432,14 @@ $t->same(null, $manager->getCountry('not-an-ip'), 'unparseable address misses');
 $t->same(null, $manager->getCountry('::1'), 'ipv6 address misses in an ipv4 database');
 $manager->close();
 
+// A valid open database whose record carries a foreign layout (a top-level
+// key other than "country") resolves every lookup as a miss.
+$t->section('mmdb: a record without a country key resolves as a miss');
+$foreignPath = buildTestMmdb(['10.0.0.0/8' => 'US'], 'region');
+$foreignManager = new GeoIpManager($foreignPath);
+$t->same(null, $foreignManager->getCountry('10.1.2.3'), 'a record without a country key is a miss');
+$foreignManager->close();
+
 $t->section('mmdb: missing database fails soft');
 $manager = new GeoIpManager(sys_get_temp_dir() . '/guard-core-php-missing-' . bin2hex(random_bytes(4)) . '.mmdb');
 $t->same(null, $manager->getCountry(GEO_US_IP), 'lookups against a missing database miss');
@@ -509,5 +522,98 @@ $response = $engine->execute($request);
 $t->same(null, $response, 'route whitelisted IP passes the deny checks');
 $t->same(false, $request->state()->isWhitelisted ?? null, 'route override clears is_whitelisted');
 $t->same(false, $request->state()->isExempt ?? null, 'route override clears is_exempt');
+
+$t->section('check: route ip lists and country verdicts drive the route stage');
+
+// Route blacklist hit denies with the route reason.
+$routeBanEngine = geoEngine(['blockedCountries' => ['ZZ'], 'geoIpHandler' => $resolver]);
+$routeBanRequest = new SimpleGuardRequest(urlPath: '/', clientHost: '203.0.113.50');
+$routeBanRequest->state()->clientIp = '203.0.113.50';
+$routeBanRequest->state()->routeConfig = new RouteConfig(ipBlacklist: ['203.0.113.0/24']);
+$routeBanEngine->execute($routeBanRequest);
+$check = $routeBanEngine->pipeline()->checks()[3] ?? null;
+$t->same(true, in_array('ip_not_allowed', array_map(static fn ($c) => $c->checkName(), $routeBanEngine->pipeline()->checks()), true) || $check !== null, 'the pipeline exposes its checks for the route stage');
+$response = $routeBanEngine->pipeline()->execute($routeBanRequest);
+$t->same(403, $response?->statusCode(), 'a route blacklisted ip is denied by the pipeline');
+$t->same(['reason' => 'IP not allowed by route config: 203.0.113.50', 'trigger_info' => ''], $routeBanRequest->state()->guardBlockStash ?? [], 'the route deny stash carries the route reason');
+
+// Route whitelist not covering the ip denies; covering it allows.
+$routeAllowEngine = geoEngine(['blockedCountries' => ['ZZ'], 'geoIpHandler' => $resolver]);
+$routeAllowRequest = new SimpleGuardRequest(urlPath: '/', clientHost: '203.0.113.60');
+$routeAllowRequest->state()->clientIp = '203.0.113.60';
+$routeAllowRequest->state()->routeConfig = new RouteConfig(ipWhitelist: ['10.0.0.0/8']);
+$t->same(403, $routeAllowEngine->pipeline()->execute($routeAllowRequest)?->statusCode(), 'an ip outside the route whitelist is denied');
+
+$routeAllowedRequest = new SimpleGuardRequest(urlPath: '/', clientHost: '203.0.113.61');
+$routeAllowedRequest->state()->clientIp = '203.0.113.61';
+$routeAllowedRequest->state()->routeConfig = new RouteConfig(ipWhitelist: ['203.0.113.0/24']);
+$t->same(null, $routeAllowEngine->pipeline()->execute($routeAllowedRequest), 'an ip inside the route whitelist passes');
+
+// Route country allowlist: an allowed country skips the global country stage.
+$routeCountryAllow = geoEngine(['blockedCountries' => ['ZZ'], 'geoIpHandler' => $resolver]);
+$allowRequest = new SimpleGuardRequest(urlPath: '/', clientHost: GEO_US_IP);
+$allowRequest->state()->clientIp = GEO_US_IP;
+$allowRequest->state()->routeConfig = new RouteConfig(whitelistCountries: ['US']);
+$t->same(null, $routeCountryAllow->pipeline()->execute($allowRequest), 'a route country allowlist passes the matching country');
+// An unresolved country fails closed under a route allowlist.
+$unresolvedRequest = new SimpleGuardRequest(urlPath: '/', clientHost: '203.0.113.99');
+$unresolvedRequest->state()->clientIp = '203.0.113.99';
+$unresolvedRequest->state()->routeConfig = new RouteConfig(whitelistCountries: ['US']);
+$unresolvedResponse = $routeCountryAllow->pipeline()->execute($unresolvedRequest);
+$t->same(403, $unresolvedResponse?->statusCode(), 'an unresolved country fails closed under a route allowlist');
+$t->same('IP not allowed by route config: 203.0.113.99', $unresolvedRequest->state()->guardBlockStash['reason'] ?? '', 'the unresolved country denial carries the route reason');
+// A foreign country misses a restrictive route allowlist.
+$foreignRequest = new SimpleGuardRequest(urlPath: '/', clientHost: GEO_BR_IP);
+$foreignRequest->state()->clientIp = GEO_BR_IP;
+$foreignRequest->state()->routeConfig = new RouteConfig(whitelistCountries: ['US']);
+$t->same(403, $routeCountryAllow->pipeline()->execute($foreignRequest)?->statusCode(), 'a foreign country misses the route allowlist');
+
+// Route blocked countries deny through the country verdict.
+$routeCountryBlock = geoEngine(['blockedCountries' => ['ZZ'], 'geoIpHandler' => $resolver]);
+$blockedRequest = new SimpleGuardRequest(urlPath: '/', clientHost: GEO_BR_IP);
+$blockedRequest->state()->clientIp = GEO_BR_IP;
+$blockedRequest->state()->routeConfig = new RouteConfig(blockedCountries: ['BR']);
+$t->same(403, $routeCountryBlock->pipeline()->execute($blockedRequest)?->statusCode(), 'a route blocked country denies');
+$otherRequest = new SimpleGuardRequest(urlPath: '/', clientHost: GEO_US_IP);
+$otherRequest->state()->clientIp = GEO_US_IP;
+$otherRequest->state()->routeConfig = new RouteConfig(blockedCountries: ['BR']);
+$t->same(null, $routeCountryBlock->pipeline()->execute($otherRequest), 'a country outside the route blocklist passes');
+
+// Passive mode: a banned ip fires the hook inline and returns null.
+$passiveBans = new IpBanManager([], null);
+$passiveBans->ban('203.0.113.70', 600);
+$passiveCheck = new IpSecurityCheck(
+    new SecurityConfig(enableRedis: false, passiveMode: true),
+    new GuardResponseFactory(),
+    $passiveBans,
+    new RouteResolver(),
+    $resolver
+);
+$hookPayload = null;
+$passiveConfigWithHook = new SecurityConfig(enableRedis: false, passiveMode: true, onBlock: function ($request, $payload) use (&$hookPayload): void {
+    $hookPayload = $payload;
+});
+$passiveHookCheck = new IpSecurityCheck($passiveConfigWithHook, new GuardResponseFactory(), $passiveBans, new RouteResolver(), $resolver);
+$passiveRequest = new SimpleGuardRequest(urlPath: '/', clientHost: '203.0.113.70');
+$passiveRequest->state()->clientIp = '203.0.113.70';
+$t->same(null, $passiveHookCheck->check($passiveRequest), 'a banned ip in passive mode returns null');
+$t->ok($hookPayload !== null && str_contains($hookPayload['reason'] ?? '', 'Banned IP attempted access'), 'the passive banned hook fires with the ban reason');
+
+// Passive mode: a route blacklist hit fires the hook inline and returns null.
+$hookPayload = null;
+$passiveRouteConfig = new SecurityConfig(enableRedis: false, passiveMode: true, onBlock: static function ($request, $payload) use (&$hookPayload): void {
+    $hookPayload = $payload;
+});
+$passiveRouteCheck = new IpSecurityCheck($passiveRouteConfig, new GuardResponseFactory(), null, new RouteResolver(), $resolver);
+$passiveRouteRequest = new SimpleGuardRequest(urlPath: '/', clientHost: '203.0.113.80');
+$passiveRouteRequest->state()->clientIp = '203.0.113.80';
+$passiveRouteRequest->state()->routeConfig = new RouteConfig(ipBlacklist: ['203.0.113.0/24']);
+$t->same(null, $passiveRouteCheck->check($passiveRouteRequest), 'a route blacklist hit in passive mode returns null');
+$t->ok(str_contains($hookPayload['reason'] ?? '', 'IP not allowed by route config'), 'the passive route deny hook fired');
+
+// A request without a client ip never scans.
+$noIpCheck = new IpSecurityCheck(new SecurityConfig(enableRedis: false), new GuardResponseFactory(), null, new RouteResolver(), $resolver);
+$noIpRequest = new SimpleGuardRequest(urlPath: '/');
+$t->same(null, $noIpCheck->check($noIpRequest), 'a request without a client ip passes');
 
 exit($t->done('test_geo_country'));

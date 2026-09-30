@@ -32,7 +32,7 @@ return function (TestRunner $t): int {
     $t->ok($conn->expireTime('k:test') > time() + 900, 'EXPIRETIME');
     $t->same(1, $conn->incr('k:counter'), 'INCR');
     $t->same('1', $conn->get('k:counter'), 'counter is a string value');
-    $conn->del('k:test', 'k:ex', 'k:px', 'k:counter');
+    $conn->del('k:test', 'k:ex', 'k:px', 'k:counter', 'k:m', 'k:mc');
     $t->ok($conn->keys('k:*') === [], 'DEL + KEYS');
 
     $conn->zAdd('k:zset', 1.5, 'a');
@@ -46,14 +46,23 @@ return function (TestRunner $t): int {
     $t->ok(strlen($sha) === 40, 'SCRIPT LOAD returns sha1');
     $t->same(0, $conn->evalSha($sha, 1, 'k:evaluated'), 'EVALSHA');
 
+    $conn->del('k:m', 'k:mc');
     $pipe = (new RespPipeline($conn))->multi();
     $pipe->set('k:m', 'mv')->incr('k:mc')->get('k:m');
     $t->same(['OK', 1, 'mv'], $pipe->execute(), 'MULTI/EXEC over real socket');
+    $conn->del('k:m', 'k:mc');
 
     $scanConn = new RespConnection($host, $port, 2.0, 2.0);
     $scanConn->set('k:s1', '1');
     $scanConn->set('k:s2', '1');
-    [$cursor, $keys] = $scanConn->scan('0', 'k:s*');
+    $cursor = '0';
+    $keys = [];
+    do {
+        [$cursor, $batch] = $scanConn->scan($cursor, 'k:s*');
+        foreach ($batch as $scanned) {
+            $keys[] = $scanned;
+        }
+    } while ($cursor !== '0');
     $t->same('0', $cursor, 'SCAN terminates with cursor 0');
     $t->ok(in_array('k:s1', $keys, true) && in_array('k:s2', $keys, true), 'SCAN MATCH returns keys');
     $scanConn->del('k:s1', 'k:s2');

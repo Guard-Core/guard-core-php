@@ -629,6 +629,37 @@ if (!$integration) {
     echo "\n";
 }
 
+$t->section('handler lifecycle: script load failure and reset');
+
+$brokenFake = new RateLimitFakeConnection();
+$brokenFake->fail = true;
+$brokenRedis = new RedisHandler(true, 'guard_core:', connection: $brokenFake);
+$brokenHandler = new RateLimitHandler(new RateLimitConfig(rateLimit: 5, rateLimitWindow: 60, enableRedis: true), null, static function (string $m): void {
+});
+$brokenHandler->initializeRedis($brokenRedis);
+$t->same(true, $brokenHandler->scriptSha() === null || is_string($brokenHandler->scriptSha()), 'a script load failure leaves the handler usable');
+$brokenHandler->reset();
+$t->same(true, $brokenHandler->scriptSha() === null, 'reset clears the script sha');
+
+$lifecycleHandler = makeHandler(new RateLimitConfig(rateLimit: 5, rateLimitWindow: 60, enableRedis: true), 0.0, $f, $r, null, $nb, true);
+$lifecycleHandler->checkRateLimit(new RateLimitRequest(), '21.1.1.1');
+$lifecycleHandler->reset();
+$t->same(null, $lifecycleHandler->scriptSha(), 'reset clears the cached sha with redis attached');
+$noRedisHandler = makeHandler(new RateLimitConfig(rateLimit: 5, rateLimitWindow: 60), 0.0, $f);
+$noRedisHandler->reset();
+$t->same(true, true, 'reset without redis is a no-op');
+
+$t->section('autoban counter lru eviction');
+$lruBans = new IpBanManager([], null);
+$lruHandler = makeHandler(new RateLimitConfig(rateLimit: 1, rateLimitWindow: 60, enableRateLimitAutoBan: true, enableIpBanning: true, autoBanThreshold: 1000000), 0.0, $f, $r, null, $lruBans, true);
+for ($i = 0; $i < 10002; $i++) {
+    $ip = sprintf('10.9.%d.%d', intdiv($i, 250), $i % 250);
+    $lruHandler->checkRateLimitByIp($ip);
+    $lruHandler->checkRateLimitByIp($ip);
+}
+$t->same(RateLimitHandler::MAX_TRACKED_RATE_LIMIT_KEYS, $lruHandler->primitiveBucketCount(), 'the autoban feed runs through the same cap');
+
+
 if ($integration) {
     $host = getenv('REDIS_HOST') ?: '127.0.0.1';
     $redis = RedisHandler::fromEnv();

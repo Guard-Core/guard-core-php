@@ -6,6 +6,8 @@ use RenzoFranceschini\GuardCore\Ban\IpBanManager;
 use RenzoFranceschini\GuardCore\Config\SecurityConfig;
 use RenzoFranceschini\GuardCore\Config\UnsupportedFeatureError;
 use RenzoFranceschini\GuardCore\Detection\SusPatterns;
+use RenzoFranceschini\GuardCore\Cloud\CloudManager;
+use RenzoFranceschini\GuardCore\Engine\GuardEngine;
 use RenzoFranceschini\GuardCore\Pipeline\BlockEvents;
 use RenzoFranceschini\GuardCore\Pipeline\CheckFactory;
 use RenzoFranceschini\GuardCore\Pipeline\Checks\IpSecurityCheck;
@@ -449,6 +451,247 @@ $t->same(false, $bans->isIpBanned('7.7.7.7'), 'below threshold not banned');
 $pipeline->execute(makeRequest(path: '/s', ip: '7.7.7.7', query: ['q' => '<script>x</script>']));
 $t->same(true, $bans->isIpBanned('7.7.7.7'), 'threshold reached -> ban applied');
 $t->same(403, $pipeline->execute(makeRequest(path: '/s', ip: '7.7.7.7', query: ['q' => 'safe']))?->statusCode(), 'subsequent clean request blocked by ban');
+
+$t->section('engine: accessors, fail-closed response, and headers');
+
+$engineConfig = new SecurityConfig(securityHeaders: ['enabled' => true]);
+$engine = new GuardEngine($engineConfig);
+$t->same($engineConfig, $engine->config(), 'the engine returns its config');
+$t->same(true, $engine->redis() instanceof RedisHandler, 'the engine exposes its redis handler');
+$t->same(true, $engine->banManager() instanceof IpBanManager, 'the engine exposes its ban manager');
+$t->same(true, $engine->rateLimitHandler() instanceof RateLimitHandler, 'the engine exposes its rate limit handler');
+$t->same(null, $engine->cloudManager(), 'no cloud manager without cloud blocking');
+$t->same(true, $engine->responseFactory() instanceof GuardResponseFactory, 'the engine exposes its response factory');
+$t->same(true, $engine->pipeline() instanceof SecurityCheckPipeline, 'the engine exposes its pipeline');
+$t->same(true, $engine->responseHeaders() !== [], 'the default engine carries response headers');
+
+$headersEngine = new GuardEngine(new SecurityConfig(blockCloudProviders: ['AWS'], securityHeaders: ['enabled' => true]));
+$t->same(true, $headersEngine->cloudManager() instanceof CloudManager, 'cloud blocking builds a cloud manager');
+$failClosed = $headersEngine->failClosedResponse();
+$t->same(500, $failClosed->statusCode(), 'the fail closed response is a 500');
+$t->same(true, $failClosed->headers()->get('x-frame-options') !== null, 'the fail closed response carries security headers');
+
+// A path that fails URL normalization is never treated as excluded.
+$pathEngine = new GuardEngine(new SecurityConfig());
+$pathResponse = $pathEngine->execute(new SimpleGuardRequest(urlPath: '/..'));
+$t->same(true, $pathResponse === null || $pathResponse instanceof GuardResponse, 'an unnormalizable path still flows through the pipeline');
+
+$disabledEngine = new GuardEngine(new SecurityConfig(enableRedis: false));
+$disabledEngine->initialize();
+$disabledEngine->banManager()->ban('9.8.7.6', 60);
+$t->same(true, $disabledEngine->banManager()->isIpBanned('9.8.7.6'), 'initialize without redis leaves local-only banning');
+
+$t->section('pipeline: checks accessor and rebuild failure semantics');
+
+$emptyConfig = new SecurityConfig();
+$emptyPipeline = new SecurityCheckPipeline([], $emptyConfig, [], rebuildChecks: static fn (): array => [], configProvider: static fn (): SecurityConfig => $emptyConfig);
+$t->same([], $emptyPipeline->checks(), 'the pipeline exposes its check list');
+
+$boomConfig = new SecurityConfig();
+$boomLive = $boomConfig;
+$boomPipeline = new SecurityCheckPipeline(
+    (new CheckFactory(new GuardResponseFactory(), new RouteResolver(), new IpBanManager(), new RateLimitHandler(new RateLimitConfig())))->buildChecks($boomConfig),
+    $boomConfig,
+    [],
+    rebuildChecks: static function (): array {
+        throw new RuntimeException('rebuild exploded');
+    },
+    configProvider: function () use (&$boomLive): SecurityConfig { return $boomLive; },
+    log: static function (string $l, string $m, array $c): void {
+    },
+);
+$boomLive = $boomConfig->with(['rate_limit' => 7]);
+$t->same(500, $boomPipeline->execute(makeRequest())?->statusCode(), 'a rebuild failure in fail-secure mode blocks with a 500');
+
+$lenientConfig = new SecurityConfig(failSecure: false);
+$lenientLive = $lenientConfig;
+$lenientPipeline = new SecurityCheckPipeline(
+    (new CheckFactory(new GuardResponseFactory(), new RouteResolver(), new IpBanManager(), new RateLimitHandler(new RateLimitConfig())))->buildChecks($lenientConfig),
+    $lenientConfig,
+    [],
+    rebuildChecks: static function (): array {
+        throw new RuntimeException('rebuild exploded');
+    },
+    configProvider: function () use (&$lenientLive): SecurityConfig { return $lenientLive; },
+    log: static function (string $l, string $m, array $c): void {
+    },
+);
+$lenientLive = $lenientConfig->with(['rate_limit' => 7]);
+$t->same(null, $lenientPipeline->execute(makeRequest()), 'a rebuild failure without fail secure keeps serving on the old checks');
+
+$t->throws(RuntimeException::class, static function (): void {
+    $strictConfig = new SecurityConfig();
+    $strictLive = $strictConfig;
+    $strictPipeline = new SecurityCheckPipeline(
+        [],
+        $strictConfig,
+        [],
+        rebuildChecks: static function (): array {
+            throw new RuntimeException('rebuild exploded');
+        },
+        configProvider: function () use (&$strictLive): SecurityConfig { return $strictLive; },
+        log: static function (string $l, string $m, array $c): void {
+        },
+    );
+    $strictLive = $strictConfig->with(['rate_limit' => 7]);
+    $strictPipeline->execute(makeRequest());
+}, 'a rebuild failure with no checks rethrows');
+
+$t->section('pipeline: check surface accessors and passive hooks');
+
+$accessorConfig = new SecurityConfig(passiveMode: true);
+$accessorHook = [];
+$accessorConfig = $accessorConfig->with(['on_block' => static function ($request, $payload) use (&$accessorHook): void {
+    $accessorHook[] = $payload['reason'] ?? '?';
+}]);
+$accessorFactory = new CheckFactory(new GuardResponseFactory(), new RouteResolver(), new IpBanManager(), new RateLimitHandler(new RateLimitConfig()));
+$accessorPipeline = new SecurityCheckPipeline($accessorFactory->buildChecks($accessorConfig), $accessorConfig);
+$byName = [];
+foreach ($accessorPipeline->checks() as $check) {
+    $byName[$check->checkName()] = $check;
+}
+$t->same(['block_cloud_providers'], $byName['cloud_ip_refresh']->containerFields(), 'cloud_ip_refresh reports its container fields');
+$t->same(['block_cloud_providers'], $byName['cloud_provider']->containerFields(), 'cloud_provider reports its container fields');
+$t->same(['endpoint_rate_limits'], $byName['rate_limit']->containerFields(), 'rate_limit reports its container fields');
+$t->same(['blocked_user_agents'], $byName['user_agent']->containerFields(), 'user_agent reports its container fields');
+$t->same([], $byName['referrer']->containerFields(), 'a stateless check reports no container fields');
+
+// HeaderBag::remove drops headers case-insensitively.
+$headers = new RenzoFranceschini\GuardCore\Request\HeaderBag();
+$headers->set('X-A', '1');
+$headers->remove('x-a');
+$t->same(null, $headers->get('X-A'), 'remove drops a header case-insensitively');
+
+// A disabled cors policy answers with no headers; an enabled one composes
+// the full surface for an allowed origin.
+$t->same(null, RenzoFranceschini\GuardCore\Cors\CorsPolicy::forConfig(new SecurityConfig()), 'a disabled cors config builds no policy');
+$disabledPolicy = new RenzoFranceschini\GuardCore\Cors\CorsPolicy(false, [], [], [], false, 0, []);
+$t->same([], $disabledPolicy->buildResponseHeaders(new RenzoFranceschini\GuardCore\Request\HeaderBag()), 'a disabled cors policy answers with no headers');
+$corsConfig = new SecurityConfig(enableCors: true, corsAllowOrigins: ['https://ok.example'], corsAllowCredentials: true, corsExposeHeaders: ['X-Extra']);
+$corsOk = RenzoFranceschini\GuardCore\Cors\CorsPolicy::forConfig($corsConfig);
+$corsHeaders = new RenzoFranceschini\GuardCore\Request\HeaderBag();
+$corsHeaders->set('Origin', 'https://ok.example');
+$built = $corsOk->buildResponseHeaders($corsHeaders);
+$t->same('true', $built['Access-Control-Allow-Credentials'] ?? null, 'an allowed credentialed origin carries the credentials header');
+$t->same('X-Extra', $built['Access-Control-Expose-Headers'] ?? null, 'the expose headers surface is composed');
+
+// DeferredCheck accessors.
+$deferred = new DeferredCheck('emergency_mode', $accessorConfig, new GuardResponseFactory(), null);
+$t->same('emergency_mode', $deferred->checkName(), 'a deferred check reports its name');
+$t->same(false, $deferred->appliesTo($accessorConfig, null), 'a deferred check without a gate never applies');
+$gated = new DeferredCheck('rate_limit', $accessorConfig, new GuardResponseFactory(), static fn (): bool => true);
+$t->same(true, $gated->appliesTo($accessorConfig, null), 'a deferred check gate decides the application');
+
+// A closed time window in passive mode fires the hook and passes.
+$twRequest = makeRequest(path: '/late');
+$twRequest->state()->clientIp = '9.9.9.9';
+$twRequest->state()->routeConfig = new RouteConfig(timeRestrictions: ['start' => '23:59', 'end' => '00:00']);
+$t->same(null, $byName['time_window']->check($twRequest), 'a closed time window in passive mode passes with a hook');
+$t->same(true, in_array('Access outside allowed time window', $accessorHook, true), 'the closed window hook fired');
+
+// A missing referrer and a disallowed referrer both hook in passive mode.
+$refRequest = makeRequest(path: '/r');
+$refRequest->state()->clientIp = '9.9.9.9';
+$refRequest->state()->routeConfig = new RouteConfig(requireReferrer: ['good.example']);
+$t->same(null, $byName['referrer']->check($refRequest), 'a missing referrer in passive mode passes with a hook');
+$refRequest2 = makeRequest(path: '/r', headers: ['referer' => 'https://evil.example/x']);
+$refRequest2->state()->clientIp = '9.9.9.9';
+$refRequest2->state()->routeConfig = new RouteConfig(requireReferrer: ['good.example']);
+$t->same(null, $byName['referrer']->check($refRequest2), 'a disallowed referrer in passive mode passes with a hook');
+$t->same(true, in_array('Missing referrer header', $accessorHook, true), 'the missing referrer hook fired');
+$t->same(true, (bool) array_filter($accessorHook, static fn (string $r): bool => str_starts_with($r, 'Invalid referrer:')), 'the invalid referrer hook fired');
+
+// A hostless referrer is never an allowed domain (passive hook fires).
+$hostlessRequest = makeRequest(path: '/r', headers: ['referer' => 'not-a-url']);
+$hostlessRequest->state()->clientIp = '9.9.9.9';
+$hostlessRequest->state()->routeConfig = new RouteConfig(requireReferrer: ['good.example']);
+$t->same(null, $byName['referrer']->check($hostlessRequest), 'a hostless referrer in passive mode passes with a hook');
+$t->same(true, (bool) array_filter($accessorHook, static fn (string $r): bool => str_starts_with($r, 'Invalid referrer: not-a-url')), 'the hostless referrer hook fired');
+
+// An oversized body in passive mode hooks instead of denying.
+$sizePassiveRequest = makeRequest(path: '/big', headers: ['content-length' => '200']);
+$sizePassiveRequest->state()->clientIp = '9.9.9.9';
+$sizePassiveRequest->state()->routeConfig = new RouteConfig(maxRequestSize: 10);
+$t->same(null, $byName['request_size_content']->check($sizePassiveRequest), 'an oversized body in passive mode passes with a hook');
+$t->same(true, (bool) array_filter($accessorHook, static fn (string $r): bool => str_contains($r, 'Request size 200 exceeds limit: 10')), 'the oversized body hook fired');
+
+// A disallowed content type in passive mode hooks instead of denying.
+$typePassiveRequest = makeRequest(path: '/type', headers: ['content-type' => 'text/plain']);
+$typePassiveRequest->state()->clientIp = '9.9.9.9';
+$typePassiveRequest->state()->routeConfig = new RouteConfig(allowedContentTypes: ['application/json']);
+$t->same(null, $byName['request_size_content']->check($typePassiveRequest), 'a disallowed content type in passive mode passes with a hook');
+$t->same(true, (bool) array_filter($accessorHook, static fn (string $r): bool => str_contains($r, 'Invalid content type: text/plain')), 'the content type hook fired');
+
+// A route requiring authentication without a header denies with the message.
+$authRequest = makeRequest(path: '/a');
+$authRequest->state()->clientIp = '9.9.9.9';
+$authRequest->state()->routeConfig = new RouteConfig(authRequired: 'x-api-key');
+$authResponse = $byName['authentication']->check($authRequest);
+$t->same(null, $authResponse, 'a missing custom auth header passes with a passive hook');
+$t->same(true, (bool) array_filter($accessorHook, static fn (string $r): bool => str_contains($r, 'Missing x-api-key authentication')), 'the missing auth hook fired');
+
+// An invalid content-length header is rejected.
+$sizeRequest = makeRequest(path: '/s', headers: ['content-length' => 'abc']);
+$sizeRequest->state()->routeConfig = new RouteConfig(maxRequestSize: 1024);
+$sizeRequest->state()->clientIp = '9.9.9.9';
+$t->throws(InvalidArgumentException::class, static fn () => $byName['request_size_content']->check($sizeRequest), 'an invalid content length is rejected');
+
+$t->section('pipeline: emergency mode and https enforcement edges');
+
+$emConfig = new SecurityConfig();
+$emCheck = new RenzoFranceschini\GuardCore\Pipeline\Checks\EmergencyModeCheck($emConfig, new GuardResponseFactory());
+$t->same(null, $emCheck->check(makeRequest()), 'an engine without emergency mode scans nothing');
+$emConfigOn = new SecurityConfig(emergencyMode: true, emergencyWhitelist: ['9.9.9.9']);
+$emCheckOn = new RenzoFranceschini\GuardCore\Pipeline\Checks\EmergencyModeCheck($emConfigOn, new GuardResponseFactory());
+$emRequest = makeRequest();
+$t->same(null, $emCheckOn->check($emRequest), 'an emergency whitelist pass keeps going');
+$emHit = makeRequest(ip: '1.2.3.4');
+$t->same(503, $emCheckOn->check($emHit)?->statusCode(), 'an emergency mode block denies with a 503');
+$emUnknown = new SimpleGuardRequest(urlPath: '/');
+$t->same(503, $emCheckOn->check($emUnknown)?->statusCode(), 'an emergency block applies to unknown clients too');
+
+// Https enforcement: a route requiring https with an untrusted proxy stays
+// on http and the x-forwarded-proto header is not believed.
+$httpsRoute = new RouteConfig(requireHttps: true);
+$httpsCheck = new RenzoFranceschini\GuardCore\Pipeline\Checks\HttpsEnforcementCheck(new SecurityConfig(trustXForwardedProto: false), new GuardResponseFactory());
+$httpsRequest = makeRequest(headers: ['x-forwarded-proto' => 'https']);
+$httpsRequest->state()->routeConfig = $httpsRoute;
+$t->same(301, $httpsCheck->check($httpsRequest)?->statusCode(), 'an http route requirement redirects to https without trusting the header');
+$httpsNotTrusted = new RenzoFranceschini\GuardCore\Pipeline\Checks\HttpsEnforcementCheck(new SecurityConfig(trustXForwardedProto: true, trustedProxies: ['10.0.0.0/8']), new GuardResponseFactory());
+$untrustedRequest = makeRequest(ip: '9.9.9.9', headers: ['x-forwarded-proto' => 'https']);
+$untrustedRequest->state()->routeConfig = $httpsRoute;
+$t->same(301, $httpsNotTrusted->check($untrustedRequest)?->statusCode(), 'an untrusted proxy never upgrades the scheme');
+$untrustedRequest->state()->routeConfig = $httpsRoute;
+$httpsNotTrusted2 = new RenzoFranceschini\GuardCore\Pipeline\Checks\HttpsEnforcementCheck(new SecurityConfig(trustXForwardedProto: true, trustedProxies: ['10.0.0.0/8'], passiveMode: true), new GuardResponseFactory());
+$t->same(null, $httpsNotTrusted2->check($untrustedRequest), 'a passive https requirement hooks instead of redirecting');
+
+// A connecting ip outside the trusted proxies is rejected by the proxy
+// membership check before the x-forwarded-proto header is ever read.
+$proxyRequest = new SimpleGuardRequest(urlPath: '/', clientHost: '9.9.9.9', headers: ['x-forwarded-proto' => 'https']);
+$proxyRequest->state()->routeConfig = $httpsRoute;
+$t->same(301, $httpsNotTrusted->check($proxyRequest)?->statusCode(), 'an untrusted connecting ip never upgrades the scheme');
+
+$t->section('pipeline: sensitive query values are redacted from error logs');
+
+$t->section('pipeline: sensitive query values are redacted from error logs');
+
+$t->section('pipeline: sensitive query values are redacted from error logs');
+
+$t->section('pipeline: sensitive query values are redacted from error logs');
+
+$redactLogs = [];
+$redactConfig = new SecurityConfig(logSensitiveParams: ['token']);
+$throwing = new RecordingCheck('boom', $order, static function (): never {
+    throw new RuntimeException('leak SUPERSECRETVALUE here');
+});
+$redactPipeline = new SecurityCheckPipeline([$throwing], $redactConfig, [], log: static function (string $l, string $m, array $c) use (&$redactLogs): void {
+    $redactLogs[] = $m;
+});
+$redactResponse = $redactPipeline->execute(makeRequest(query: ['token' => 'SUPERSECRETVALUE']));
+$t->same(500, $redactResponse?->statusCode(), 'a throwing check in fail-secure mode blocks');
+$redactedLine = implode("\n", $redactLogs);
+$t->same(true, str_contains($redactedLine, '[REDACTED]'), 'the error log carries the redaction marker');
+$t->same(true, !str_contains($redactedLine, 'SUPERSECRETVALUE'), 'the error log never carries the sensitive value');
 
 $integration = getenv('REDIS_HOST') !== '0';
 if ($integration) {

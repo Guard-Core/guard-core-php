@@ -3,16 +3,40 @@
 declare(strict_types=1);
 
 use RenzoFranceschini\GuardCore\Ban\BanEventSink;
+use RenzoFranceschini\GuardCore\Cloud\RedisCloudIpStore;
 use RenzoFranceschini\GuardCore\Ban\IpBanManager;
 use RenzoFranceschini\GuardCore\Ip\CanonicalIp;
-use RenzoFranceschini\GuardCore\Redis\GuardRedisException;
 use RenzoFranceschini\GuardCore\Redis\RedisHandler;
+use RenzoFranceschini\GuardCore\Redis\GuardRedisException;
 use RenzoFranceschini\GuardCore\Redis\RespConnection;
 use RenzoFranceschini\GuardCore\Redis\RespPipeline;
 
 
 require __DIR__ . '/../vendor/autoload.php';
 require __DIR__ . '/../tests/FakeRespConnection.php';
+
+final class AbortingExecConnection extends RespConnection
+{
+    public function writeCommands(array $commands): void
+    {
+        $this->replies = ['OK'];
+        foreach ($commands as $index => $_) {
+            if ($index === 0) {
+                continue;
+            }
+            $this->replies[] = $index === 1 ? 'ERR nope' : 'QUEUED';
+        }
+        $this->replies[] = 'NOT-AN-ARRAY';
+    }
+
+    public function readReplies(int $count): array
+    {
+        $out = array_slice($this->replies, 0, $count);
+        $this->replies = array_slice($this->replies, $count);
+
+        return $out;
+    }
+}
 
 final class TestRunner
 {
@@ -264,6 +288,227 @@ $t->ok($dMgr->ban('8.8.8.8', 7200), 'ban without redis');
 $t->ok($dMgr->isIpBanned('8.8.8.8'), 'local-only enforcement');
 $ddur = array_values(array_slice($sink->bans, -1))[0]['duration'];
 $t->same(3600, $ddur, 'no-handler ban clamped to 3600 (spec 09)');
+
+$t->section('ban expiry: local entries age out');
+$eMgr = new IpBanManager([], null, $sink);
+$eMgr->ban('9.9.9.1', 1);
+$eMgr->ban('11.0.0.0/8', 1);
+$t->ok($eMgr->isIpBanned('9.9.9.1'), 'fresh short ban enforced');
+$t->ok($eMgr->isIpBanned('11.1.2.3'), 'fresh short cidr enforced');
+usleep(1150000);
+$t->ok(!$eMgr->isIpBanned('9.9.9.1'), 'an expired exact ban is unset and false');
+$t->ok(!$eMgr->isIpBanned('11.1.2.3'), 'an expired network entry drops out of the cache');
+$t->ok(!$eMgr->isIpBanned('totally-not-an-ip'), 'an unparseable ip is never banned');
+
+$t->section('ban input validation');
+$t->throws(fn () => (new IpBanManager([], null, $sink))->ban('999.999.999.999', 600), \InvalidArgumentException::class, 'an invalid exact ip is rejected');
+$t->throws(fn () => (new IpBanManager([], null, $sink))->ban('1.2.3.4/33', 600), \InvalidArgumentException::class, 'a v4 cidr with an out of range prefix is rejected');
+
+$t->section('ban refusal geometry: prefix zero, partial bits, families');
+$privateWarnings = [];
+$pMgr = new IpBanManager([], function (string $m) use (&$privateWarnings) { $privateWarnings[] = $m; }, $sink);
+// /0 target: the hi() bound collapses to all-ones; refused as loopback.
+$t->ok(!$pMgr->ban('8.8.8.8/0', 600), 'a zero prefix target overlaps everything and is refused');
+// /9 target: the partial-byte bound keeps the remaining high bits.
+$t->ok((new IpBanManager(['10.64.0.0/9'], null, $sink))->ban('10.90.0.1/32', 600) === false, 'a partial prefix overlap with a trusted proxy is refused');
+// mixed families never overlap and are allowed.
+$v6Mgr = new IpBanManager(['2001:db8::/32'], null, $sink);
+$t->ok($v6Mgr->ban('8.8.8.8', 600), 'a v4 target does not overlap a v6 trusted proxy');
+$t->ok($v6Mgr->ban('2001:db9::1', 600), 'a v6 target outside the proxy prefix is allowed');
+
+$t->section('private range warnings');
+$t->ok($pMgr->ban('fe80::/10', 600), 'a link local range ban succeeds with a warning');
+$t->ok($pMgr->ban('fd00::/8', 600), 'a unique local range ban succeeds with a warning');
+$t->ok($pMgr->ban('::ffff:10.0.0.5', 600), 'a v4 mapped private address ban succeeds with a warning');
+$t->ok(count(array_filter($privateWarnings, fn ($w) => str_contains($w, 'private IP range'))) === 3, 'each private range ban warned once');
+
+$t->section('local cache overflow eviction');
+$oMgr = new IpBanManager([], null, null);
+for ($i = 0; $i <= 10001; $i++) {
+    $oMgr->ban(sprintf('9.%d.%d.%d', intdiv($i, 65536), intdiv($i, 256) % 256, $i % 256), 600);
+}
+$t->ok(!$oMgr->isIpBanned('9.0.0.0'), 'the first banned ip was evicted');
+$t->ok($oMgr->isIpBanned('9.0.39.17'), 'the newest banned ip survives');
+
+$t->section('redis handler: disabled and enabled surfaces');
+
+$disabledHandler = new RedisHandler(false, 'guard_core_test:');
+$disabledHandler->initialize();
+$t->ok(!$disabledHandler->isInitialized(), 'a disabled handler never initializes');
+$t->same(false, $disabledHandler->setKey('ns', 'k', 'v'), 'setKey on a disabled handler is false');
+$t->same(null, $disabledHandler->exists('ns', 'k'), 'exists on a disabled handler is null');
+$t->same(0, $disabledHandler->delete('ns', 'k'), 'delete on a disabled handler is zero');
+$t->same([], $disabledHandler->keys('ns:*'), 'keys on a disabled handler is empty');
+$t->same(0, $disabledHandler->deletePattern('ns:*'), 'deletePattern on a disabled handler is zero');
+$t->same(0, $disabledHandler->incr('ns', 'k'), 'incr on a disabled handler is zero');
+$t->same(0, $disabledHandler->recordSlidingWindowHit('ns', 'k', microtime(true), microtime(true) - 60, 60), 'sliding window on a disabled handler is zero');
+$t->same(null, $disabledHandler->getKey('ns', 'k'), 'getKey on a disabled handler is null');
+
+$fakeRedis = new FakeRespConnection();
+$enabledHandler = new RedisHandler(true, 'guard_core_test:', connection: $fakeRedis);
+$enabledHandler->initialize();
+$t->ok($enabledHandler->isInitialized(), 'an enabled handler initializes');
+$t->same(true, $enabledHandler->setKey('ns', 'k', 'v'), 'setKey round-trips');
+$t->same(true, $enabledHandler->exists('ns', 'k'), 'exists reports the stored key');
+$t->same(false, $enabledHandler->exists('ns', 'missing'), 'exists reports misses');
+$t->same(1, $enabledHandler->delete('ns', 'k'), 'delete removes the key');
+$t->same(true, $enabledHandler->setKey('ns', 'gone', 'v'), 'seed a key for the pattern delete');
+$t->same(1, $enabledHandler->deletePattern('ns:gone*'), 'deletePattern removes matching keys');
+$t->same(0, $enabledHandler->deletePattern('ns:nothing*'), 'deletePattern with no matches is zero');
+$t->same(1, $enabledHandler->incr('ns', 'counter'), 'incr starts at one');
+$t->same(2, $enabledHandler->incr('ns', 'counter'), 'incr accumulates');
+$t->ok($enabledHandler->recordSlidingWindowHit('ns', 'win', microtime(true), microtime(true) - 60, 60) >= 1, 'a sliding window hit records');
+
+$t->section('redis cloud ip store: decode, encode, clear');
+
+$cloudFake = new FakeRespConnection();
+$cloudStore = new RenzoFranceschini\GuardCore\Cloud\RedisCloudIpStore(new RedisHandler(true, 'guard_core_probe:', connection: $cloudFake));
+$cloudFake->seed('guard_core_probe:cloud_ip_v2:AWS', 'not-json');
+$t->same(null, $cloudStore->get('AWS'), 'a malformed payload decodes as null');
+$cloudFake->seed('guard_core_probe:cloud_ip_v2:AWS', '{"a":1}');
+$t->same(null, $cloudStore->get('AWS'), 'a map payload decodes as null');
+$cloudFake->seed('guard_core_probe:cloud_ip_v2:AWS', '[1,2]');
+$t->same(null, $cloudStore->get('AWS'), 'a list of numbers decodes as null');
+$cloudFake->seed('guard_core_probe:cloud_ip_v2:AWS', '["10.0.0.0/8"]');
+$t->same(['10.0.0.0/8'], $cloudStore->get('AWS'), 'a list of strings decodes as ranges');
+$cloudStore->set('GCP', ['10.1.0.0/16', '10.0.0.0/8']);
+$t->same('["10.0.0.0/8", "10.1.0.0/16"]', $cloudFake->store['guard_core_probe:cloud_ip_v2:GCP']['value'] ?? null, 'set sorts and encodes the ranges');
+$t->throws(static fn () => $cloudStore->set('X', [NAN]), RuntimeException::class, 'an unencodable range raises');
+$cloudStore->set('AZ', ['10.4.0.0/16']);
+$cloudStore->clear();
+$t->same(false, isset($cloudFake->store['guard_core_probe:cloud_ip_v2:GCP']), 'clear removes stored providers');
+$t->same(false, isset($cloudFake->store['guard_core_probe:cloud_ip_v2:AZ']), 'clear removes every stored provider');
+
+$memoryStore = new RenzoFranceschini\GuardCore\Cloud\InMemoryCloudIpStore();
+$memoryStore->set('AWS', ['10.0.0.0/8']);
+$memoryStore->clear();
+$t->same(null, $memoryStore->get('AWS'), 'the in memory store clears too');
+
+$t->section('resp pipeline: exec, ttl variants, and delete');
+
+$pipeFake = new FakeRespConnection();
+$respPipe = $pipeFake->pipeline();
+$t->same([], $respPipe->execute(), 'an empty pipeline executes to an empty list');
+$respPipe->set('k', 'v', ex: 60);
+$respPipe->set('k2', 'v2', px: 500);
+$respPipe->del('k', 'k2');
+$t->same(['OK', 'OK', 2], $respPipe->execute(), 'set with ex, px and a multi key del execute');
+
+$t->section('resp pipeline: aborted exec');
+
+$abortFake = new AbortingExecConnection();
+$abortPipe = $abortFake->pipeline()->multi();
+$abortPipe->set('a', 'b');
+$abortPipe->set('c', 'd');
+$t->throws(static fn () => $abortPipe->execute(), GuardRedisException::class, 'a non array exec reply aborts the pipeline');
+
+$t->section('resp connection: scripted stream error paths');
+
+/**
+ * Starts tests/resp_scripted_server.php in the given mode and returns
+ * [proc, port]; the caller must proc_close in a finally.
+ */
+function startRespServer(string $mode): array
+{
+    $command = [PHP_BINARY, __DIR__ . '/../tests/resp_scripted_server.php', $mode];
+    $proc = proc_open($command, [1 => ['pipe', 'w'], 2 => ['pipe', 'w']], $pipes);
+    if (!is_resource($proc)) {
+        throw new RuntimeException('failed to start the scripted resp server');
+    }
+    $portLine = fgets($pipes[1], 32);
+    if ($portLine === false) {
+        proc_terminate($proc);
+        throw new RuntimeException('the scripted resp server printed no port');
+    }
+
+    return [$proc, $pipes, (int) trim($portLine)];
+}
+
+function withRespServer(string $mode, callable $fn): void
+{
+    [$proc, $pipes, $port] = startRespServer($mode);
+    try {
+        $fn(new RespConnection('127.0.0.1', $port, 2.0, 2.0));
+    } finally {
+        foreach ($pipes as $pipe) {
+            fclose($pipe);
+        }
+        proc_terminate($proc);
+        proc_close($proc);
+    }
+}
+
+function respExpect(string $mode, callable $fn, string $label): void
+{
+    global $t;
+    try {
+        withRespServer($mode, $fn);
+        $t->ok(true, $label);
+    } catch (GuardRedisException $e) {
+        $t->ok(str_contains($e->getMessage(), 'Redis'), "{$label} ({$e->getMessage()})");
+    }
+}
+
+// A non-array reply to KEYS and ZRANGEBYSCORE yields an empty list.
+respExpect('int_reply', static function (RespConnection $conn): void {
+    global $t;
+    $conn->ping();
+    $t->same([], $conn->keys('nomatch:*'), 'a non array keys reply yields an empty list');
+    $t->same([], $conn->zRangeByScore('z', '0', '10'), 'a non array zrange reply yields an empty list');
+}, 'int replies keep the connection usable');
+respExpect('null_array', static function (RespConnection $conn): void {
+    global $t;
+    $t->same([], $conn->keys('*'), 'a null array keys reply yields an empty list');
+    $t->same([], $conn->zRangeByScore('z', '0', '10'), 'a null array zrange reply yields an empty list');
+}, 'null array replies yield empty lists');
+
+// A redis -ERR reply surfaces as GuardRedisException.
+respExpect('error', static function (RespConnection $conn): void {
+    $conn->ping();
+}, 'an error reply throws with the redis prefix');
+
+// A null bulk decodes to PHP null.
+respExpect('null_bulk', static function (RespConnection $conn): void {
+    global $t;
+    $t->same(null, $conn->get('missing'), 'a null bulk reply decodes to null');
+}, 'null bulk replies decode');
+
+// An unknown reply type byte is a protocol error.
+respExpect('garbage', static function (RespConnection $conn): void {
+    $conn->ping();
+}, 'an unknown reply type throws a protocol error');
+
+// A server that closes without replying produces the empty-reply error.
+respExpect('close_now', static function (RespConnection $conn): void {
+    $conn->ping();
+}, 'a closed socket produces the empty reply error');
+
+// A truncated bulk payload dies in the byte reader.
+respExpect('half_bulk', static function (RespConnection $conn): void {
+    $conn->get('k');
+}, 'a truncated bulk reply fails the byte read');
+
+// A server that never answers trips the socket timeout in the line reader.
+$t0 = microtime(true);
+try {
+    withRespServer('hang', static function (RespConnection $conn): void {
+        $conn->ping();
+    });
+    $t->ok(false, 'a silent server throws the timeout error');
+} catch (GuardRedisException $e) {
+    $t->ok(str_contains($e->getMessage(), 'timeout'), 'a silent server trips the socket timeout (' . $e->getMessage() . ')');
+}
+$t->ok(microtime(true) - $t0 < 4, 'the timeout fires at the client budget, not the server one');
+
+// A peer that disappears mid-write fails the write loop.
+try {
+    withRespServer('rst', static function (RespConnection $conn): void {
+        $conn->zAdd('bigz', 1.0, str_repeat('x', 4 * 1024 * 1024));
+    });
+    $t->same('no-exception', 'GuardRedisException', 'a failed write throws');
+} catch (GuardRedisException $e) {
+    $t->ok(str_contains($e->getMessage(), 'Redis write failed'), 'a dead peer fails the write loop (' . $e->getMessage() . ')');
+}
 
 $exit = $t->summary();
 

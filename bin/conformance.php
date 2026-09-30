@@ -43,16 +43,27 @@ final class ConformanceRunner
     {
         $files = glob($this->casesDir . '/*.json');
         sort($files);
+        $suiteCount = 0;
         foreach ($files as $file) {
             $suite = json_decode((string) file_get_contents($file), true, 512, JSON_THROW_ON_ERROR);
             if (!isset($suite['cases'])) {
                 continue;
             }
+            if (($suite['kind'] ?? 'detect') !== 'detect') {
+                // Pipeline-kind suites are replayed by bin/conformance_pipeline.php.
+                continue;
+            }
+            $suiteCount++;
             $suiteName = $suite['suite'] ?? basename($file, '.json');
             echo "=== {$suiteName} ===\n";
             foreach ($suite['cases'] as $case) {
                 $this->runCase($case);
             }
+        }
+        if ($suiteCount === 0) {
+            echo "FAIL: corpus glob matched zero detect suites in {$this->casesDir}; a vacuous pass is a failure\n";
+
+            return 1;
         }
         echo "\nPassed: {$this->passed}, Failed: {$this->failed}, Skipped: {$this->skipped}\n";
         $total = $this->passed + $this->failed + $this->skipped;
@@ -164,7 +175,7 @@ ini_set('memory_limit', '2G');
 
 $root = dirname(__DIR__);
 $runner = new ConformanceRunner(
-    $root . '/tests/Conformance/guard-core-spec-4.0.3/cases',
-    ConformanceRunner::loadKnownGaps($root . '/tests/Conformance/KNOWN_GAPS.md'),
+    $root . '/conformance/guard-core-spec-4.1.0/cases',
+    ConformanceRunner::loadKnownGaps($root . '/KNOWN_GAPS.md'),
 );
 exit($runner->run());

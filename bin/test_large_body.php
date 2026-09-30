@@ -121,7 +121,7 @@ $t->same(15360, SusPatterns::GATED_PATTERN_MAX_SUBJECT_BYTES, 'gate threshold is
 
 $corpusMax = 0;
 $binaryCorpusMax = 0;
-foreach (glob(__DIR__ . '/../tests/Conformance/guard-core-spec-4.0.3/cases/*.json') ?: [] as $file) {
+foreach (glob(__DIR__ . '/../conformance/guard-core-spec-4.1.0/cases/*.json') ?: [] as $file) {
     $suite = json_decode((string) file_get_contents($file), true, 512, JSON_THROW_ON_ERROR);
     foreach ($suite['cases'] ?? [] as $case) {
         $size = strlen((string) ($case['input']['content'] ?? ''));

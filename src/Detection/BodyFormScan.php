@@ -695,12 +695,18 @@ final class BodyFormScan
             // None charset falls back to us-ascii with errors='replace'.
             return trim(self::usAsciiReplace($text));
         }
-        $converted = @mb_convert_encoding($text, 'UTF-8', strtolower($charset));
+        // The Python engine catches LookupError for an unknown codec; the
+        // PHP equivalent is the ValueError mb_convert_encoding raises for
+        // an unknown charset (a bare false return never happens on PHP 8).
+        try {
+            $converted = @mb_convert_encoding($text, 'UTF-8', strtolower($charset));
+        } catch (\ValueError) {
+            $converted = false;
+        }
         if (is_string($converted)) {
             return trim($converted);
         }
-        // Unknown charset: the Python engine catches LookupError and
-        // returns the already-unquoted text.
+        // Unknown charset: keep the already-unquoted text.
         return trim($text);
     }
 

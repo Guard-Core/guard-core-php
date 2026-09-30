@@ -94,7 +94,7 @@ panic-guarded (throwing hooks are swallowed) and never alters the verdict.
 ## Conformance
 
 `php bin/conformance.php` replays the shared JSON fixture corpus
-(`tests/Conformance/guard-core-spec-4.0.2/`) generated from the Python engine
+(`conformance/guard-core-spec-4.1.0/`) generated from the Python engine
 and compares verdicts field by field, so any detector change that would drift
 from the reference fails CI. Never hand-edit expected values or the generated
 tables under `src/Support/Generated/`.

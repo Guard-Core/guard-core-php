@@ -467,6 +467,50 @@ if ($redisUp) {
     $redis->deletePattern('behavior_usage:behavior:usage:*');
 }
 
+$t->section('tracker: response pattern edges');
+
+$t->same([false, true], $tracker->checkResponsePattern($factory->createResponse('x', 200), 'status:oops'), 'a non-integer status pattern evaluates false');
+$t->same([false, true], $onTracker->checkResponsePattern(null, 'denied'), 'a null body is not evaluated for substring patterns');
+$t->same([false, true], $onTracker->checkResponsePattern($factory->createResponse('', 200), 'denied'), 'an empty body is not evaluated for substring patterns');
+$t->same([true, true], $onTracker->checkResponsePattern($factory->createResponse('[1, 2]', 200), 'json:0==1'), 'a json array body indexes numerically');
+$t->same([false, true], $onTracker->checkResponsePattern($factory->createResponse('x', 200), 'regex:([unclosed'), 'an invalid regex evaluates false with an error log');
+$t->same([true, true], $onTracker->checkResponsePattern($factory->createResponse('{"a": {"b": "YES"}}', 200), 'json:a.b==yes'), 'nested json paths match');
+$t->same([false, true], $onTracker->checkResponsePattern($factory->createResponse('{"a": 1}', 200), 'json:nope==1'), 'a missing json path is a mismatch');
+$t->same(false, (new BehaviorTracker(new SecurityConfig(enableRedis: false, behaviorScanResponseBody: true), null, null))->trackReturnPattern('GET:/x', '10.2.0.9', $resp, new BehaviorRule('return_pattern', 2, window: 60), $now), 'a rule without a pattern never counts');
+
+$t->section('tracker: redis failure handling');
+
+$deadRedis = new RenzoFranceschini\GuardCore\Redis\RedisHandler(
+    enableRedis: true,
+    prefix: 'guard_core_test_dead:',
+    host: '127.0.0.1',
+    port: 1
+);
+$closedConfig = new SecurityConfig(enableRedis: true, redisFailOpen: false);
+$closedTracker = new BehaviorTracker($closedConfig, $deadRedis, null);
+$openTracker = new BehaviorTracker(new SecurityConfig(enableRedis: true, redisFailOpen: true), $deadRedis, null);
+$usageRule = new BehaviorRule('usage', 2, window: 60);
+$returnRuleDead = new BehaviorRule('return_pattern', 2, window: 60, pattern: 'denied');
+$t->same(false, $closedTracker->trackEndpointUsage('GET:/dead', '10.3.0.1', $usageRule, $now), 'fail-closed usage tracking reports false when redis is down');
+$t->same(false, $closedTracker->trackReturnPattern('GET:/dead', '10.3.0.1', $resp, $returnRuleDead, $now), 'fail-closed return tracking reports false when redis is down');
+$t->ok(is_bool($openTracker->trackEndpointUsage('GET:/dead', '10.3.0.2', $usageRule, $now)), 'fail-open usage tracking falls back to local counting');
+$t->ok(is_bool($openTracker->trackReturnPattern('GET:/dead', '10.3.0.2', $resp, $returnRuleDead, $now)), 'fail-open return tracking falls back to local counting');
+
+$t->section('tracker: redis-backed return rules');
+
+if ($redisUp) {
+    $redisTracker = new BehaviorTracker(new SecurityConfig(enableRedis: true), $redis, null);
+    $redisReturnRule = new BehaviorRule('return_pattern', 1, window: 60, pattern: 'status:503');
+    $rResp = $factory->createResponse('unavailable', 503);
+    $rNow = microtime(true);
+    $redisResults = [
+        $redisTracker->trackReturnPattern('GET:/redis-return', '10.9.8.7', $rResp, $redisReturnRule, $rNow),
+        $redisTracker->trackReturnPattern('GET:/redis-return', '10.9.8.7', $rResp, $redisReturnRule, $rNow + 1),
+    ];
+    $t->same([false, true], $redisResults, 'the redis return window trips on the second match');
+    $redis->deletePattern('behavior_returns:behavior:return:*');
+}
+
 $t->section('engine: zero rules means zero behavior change');
 $logs = [];
 $engine = behaviorLoggingEngine($logs, );
@@ -474,5 +518,126 @@ $response = $engine->execute(behaviorRequest('/'));
 $t->same(null, $response, 'plain request passes');
 $engine->processResponse(behaviorRequest('/'), $factory->createResponse('anything', 200));
 $t->same([], array_filter($logs, static fn (array $l): bool => str_contains($l[1], 'behavioral')), 'no behavior logs without rules');
+
+$t->section('tracker: fail-closed return rules evaluate the body first');
+$deadBodyTracker = new BehaviorTracker(
+    new SecurityConfig(enableRedis: true, redisFailOpen: false, behaviorScanResponseBody: true),
+    $deadRedis,
+    null
+);
+$t->same(false, $deadBodyTracker->trackReturnPattern('GET:/dead', '10.3.0.9', $factory->createResponse('ACCESS DENIED', 200), $returnRuleDead, $now), 'fail-closed return tracking with body scan reports false when redis is down');
+
+$t->section('tracker: local store bounds evict oldest entries');
+$boundsConfig = new SecurityConfig(enableRedis: false, behaviorScanResponseBody: true);
+$boundsTracker = new BehaviorTracker($boundsConfig, null, null);
+for ($i = 0; $i <= 10001; $i++) {
+    $boundsTracker->trackEndpointUsage("GET:/ep/{$i}", '10.4.0.1', $usageRule, $now);
+}
+$t->same(false, $boundsTracker->trackEndpointUsage('GET:/ep/10001', '10.4.0.2', $usageRule, $now), 'the newest endpoint bucket still tracks');
+for ($i = 0; $i <= 10001; $i++) {
+    $boundsTracker->trackEndpointUsage('GET:/bounded', "10.5.{$i}." . ($i % 256), $usageRule, $now);
+}
+$t->same(false, $boundsTracker->trackEndpointUsage('GET:/bounded', '10.5.39.17', $usageRule, $now), 'the newest client still tracks');
+
+$t->section('tracker: response pattern scalar and guard edges');
+$scalarTracker = new BehaviorTracker(new SecurityConfig(enableRedis: false, behaviorScanResponseBody: true), null, null);
+$t->same([false, true], $scalarTracker->checkResponsePattern($factory->createResponse('{"flag": true}', 200), 'json:flag==false'), 'a json boolean compares as its lowercase name');
+$t->same([true, true], $scalarTracker->checkResponsePattern($factory->createResponse('{"flag": true}', 200), 'json:flag==true'), 'a json boolean true matches');
+$t->same([false, true], $scalarTracker->checkResponsePattern($factory->createResponse('{"flag": null}', 200), 'json:flag==missing'), 'a json null renders as the empty string');
+$t->same([false, true], $scalarTracker->checkResponsePattern($factory->createResponse('{"a": 1}', 200), 'json:a'), 'a json pattern without == is a mismatch');
+$t->same(false, $scalarTracker->trackReturnPattern('GET:/x', '10.2.1.9', $factory->createResponse('x', 200), new BehaviorRule('return_pattern', 2, window: 60, pattern: ''), $now), 'a blank pattern rule never counts');
+
+$t->section('tracker: passive applyAction dispatch');
+$passiveLogs = [];
+$passiveCapture = function (string $level, string $message, array $ctx = []) use (&$passiveLogs): void {
+    $passiveLogs[] = [$level, $message, $ctx];
+};
+$passiveTracker = new BehaviorTracker(new SecurityConfig(enableRedis: false, passiveMode: true), null, null, $passiveCapture);
+$passiveTracker->applyAction(new BehaviorRule('usage', 1, action: 'ban'), '10.6.0.1', 'GET:/x', 'details-ban');
+$passiveTracker->applyAction(new BehaviorRule('usage', 1, action: 'alert'), '10.6.0.2', 'GET:/x', 'details-alert');
+$passiveTracker->applyAction(new BehaviorRule('usage', 1, action: 'log'), '10.6.0.3', 'GET:/x', 'details-log');
+$passiveTracker->applyAction(new BehaviorRule('usage', 1, action: 'throttle'), '10.6.0.4', 'GET:/x', 'details-throttle');
+$passiveText = implode("\n", array_map(static fn (array $l): string => $l[1], $passiveLogs));
+$t->ok(str_contains($passiveText, 'Would ban IP 10.6.0.1'), 'passive ban action logs the would-ban line');
+$t->ok(str_contains($passiveText, 'ALERT - Behavioral anomaly: details-alert'), 'passive alert action logs critical');
+$t->ok(str_contains($passiveText, 'Behavioral anomaly detected: details-log'), 'passive log action logs the anomaly');
+$t->ok(str_contains($passiveText, 'Would throttle IP 10.6.0.4'), 'passive throttle action logs the would-throttle line');
+
+$t->section('processor: non matching rule types skip');
+
+$skipTracker = new BehaviorTracker(new SecurityConfig(enableRedis: false, behaviorScanResponseBody: true), null, null);
+$skipLogs = [];
+$skipProcessor = new BehavioralProcessor(new SecurityConfig(enableRedis: false), $skipTracker, null, static function (string $level, string $message, array $context) use (&$skipLogs): void {
+    $skipLogs[] = $message;
+});
+$skipRoute = new RouteConfig(behaviorRules: [
+    ['rule_type' => 'return_pattern', 'threshold' => 1, 'pattern' => 'denied', 'action' => 'log'],
+]);
+$skipProcessor->processUsageRules(behaviorRequest('/x'), '10.8.0.1', $skipRoute, microtime(true));
+$t->same([], $skipLogs, 'usage processing skips return pattern rules');
+$usageRoute = new RouteConfig(behaviorRules: [
+    ['rule_type' => 'usage', 'threshold' => 1, 'window' => 60, 'action' => 'log'],
+]);
+$skipProcessor->processReturnRules(behaviorRequest('/x'), $factory->createResponse('denied', 200), '10.8.0.2', $usageRoute, microtime(true));
+$t->same([], $skipLogs, 'return processing skips usage rules');
+$skipProcessor->processGlobalReturnRules(behaviorRequest('/x'), $factory->createResponse('denied', 200), '10.8.0.3', microtime(true));
+$t->same([], $skipLogs, 'global processing skips usage rules');
+
+// log-less processor: a matched rule never crashes without a logger.
+$quietProcessor = new BehavioralProcessor(new SecurityConfig(enableRedis: false), $skipTracker, null);
+$quietRoute = new RouteConfig(behaviorRules: [
+    ['rule_type' => 'usage', 'threshold' => 1, 'window' => 60, 'action' => 'log'],
+]);
+$quietProcessor->processUsageRules(behaviorRequest('/x'), '10.8.1.1', $quietRoute, microtime(true) - 10);
+$quietProcessor->processUsageRules(behaviorRequest('/x'), '10.8.1.1', $quietRoute, microtime(true));
+$t->same(true, true, 'a matched rule without a logger still dispatches');
+
+$t->section('behavior rule: construction edges');
+
+$t->throws(static fn () => new BehaviorRule('usage', 1, window: -5), InvalidArgumentException::class, null, 'a negative window is rejected');
+$t->throws(static fn () => new BehaviorRule('usage', 1, pattern: 3), TypeError::class, null, 'a non string pattern is rejected');
+$t->throws(static fn () => BehaviorRule::fromArray(['rule_type' => 3, 'threshold' => 1]), InvalidArgumentException::class, null, 'a non string rule type in fromArray is rejected');
+$t->throws(static fn () => BehaviorRule::fromArray(['rule_type' => 'usage']), InvalidArgumentException::class, null, 'fromArray without a threshold is rejected');
+
+$t->section('processor: route and rule type guards');
+
+$guardLogs = [];
+$guardTracker = new BehaviorTracker(new SecurityConfig(enableRedis: false, behaviorScanResponseBody: true), null, null);
+$guardProcessor = new BehavioralProcessor(new SecurityConfig(enableRedis: false), $guardTracker, null, static function (string $level, string $message, array $context) use (&$guardLogs): void {
+    $guardLogs[] = $message;
+});
+// A null route config leaves both processors idle.
+$guardProcessor->processReturnRules(behaviorRequest('/x'), $factory->createResponse('denied', 200), '10.10.0.1', null, microtime(true));
+$t->same([], $guardLogs, 'return processing without a route config is idle');
+// Global rules of a non return type are skipped.
+$usageGlobal = new SecurityConfig(enableRedis: false, globalBehaviorRules: [['rule_type' => 'usage', 'threshold' => 1, 'window' => 60, 'action' => 'log']]);
+$guardProcessor2 = new BehavioralProcessor($usageGlobal, $guardTracker, null, static function (string $level, string $message, array $context) use (&$guardLogs): void {
+    $guardLogs[] = $message;
+});
+$guardProcessor2->processGlobalReturnRules(behaviorRequest('/x'), $factory->createResponse('denied', 200), '10.10.0.2', microtime(true));
+$t->same([], $guardLogs, 'global processing skips usage rules');
+
+// Active ban action with no ban manager attached: nothing happens.
+$activeTracker = new BehaviorTracker(new SecurityConfig(enableRedis: false), null, null);
+$activeTracker->applyAction(new BehaviorRule('usage', 1, action: 'ban'), '10.10.0.3', 'GET:/x', 'no-ban-manager');
+$t->same(true, true, 'an active ban without a ban manager is a no-op');
+
+// A usage rule with a pattern is unaffected by the scan-flag validation.
+$patternUsage = new SecurityConfig(globalBehaviorRules: [['rule_type' => 'usage', 'threshold' => 1, 'pattern' => 'x']]);
+$t->same(1, count($patternUsage->globalBehaviorRules), 'a usage rule with a pattern is kept');
+$t->throws(
+    static fn () => new SecurityConfig(globalBehaviorRules: [['rule_type' => 'return_pattern', 'threshold' => 1, 'pattern' => 'denied', 'action' => 'log']]),
+    InvalidArgumentException::class,
+    'would never match',
+    'a body return pattern without the scan flag is rejected'
+);
+// A status pattern rule does not require the scan flag.
+$statusGlobal = new SecurityConfig(globalBehaviorRules: [['rule_type' => 'return_pattern', 'threshold' => 2, 'pattern' => 'status:404', 'action' => 'log']]);
+$t->same(1, count($statusGlobal->globalBehaviorRules), 'a status return pattern rule survives without the scan flag');
+
+$t->section('tracker: json array guard on a flat field');
+
+$flatTracker = new BehaviorTracker(new SecurityConfig(enableRedis: false, behaviorScanResponseBody: true), null, null);
+$t->same([false, true], $flatTracker->checkResponsePattern($factory->createResponse('{"errors": "flat"}', 200), 'json:errors[]==denied'), 'a flat field under an array pattern is a mismatch');
 
 exit($t->done('test_behavior'));
