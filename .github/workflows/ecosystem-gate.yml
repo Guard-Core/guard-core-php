@@ -70,12 +70,27 @@ jobs:
           ref: ${{ github.event.inputs.consumer_ref }}
           path: ${{ matrix.consumer.path }}
 
+      # slim-guard 1.2.0 added the rennf93/psr15-guard path repository and
+      # its composer.lock pins psr15-guard at the CI-only 1.2.99 path
+      # version, which Packagist cannot satisfy: without the sibling the
+      # install fails with "Source path ../psr15-guard is not found". Check
+      # the sibling out next to the consumer (same pattern as slim-guard's
+      # own ci.yml); the patch step below stamps it.
+      - name: Checkout the psr15-guard path sibling (slim-guard)
+        if: matrix.consumer.repo == 'rennf93/slim-guard'
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: rennf93/psr15-guard
+          ref: master
+          path: psr15-guard
+          persist-credentials: false
+
       # guard-core-php v4.1.0 was yanked: the tag is deleted and Packagist
       # no longer lists it, so ^4.1.0 cannot resolve from Packagist and the
       # consumer's github VCS fallback hard-fails (anonymous GitHub API auth).
       # CI-only patch, runner filesystem only, published files untouched:
       # stamp a version onto this checkout's composer.json so the consumer's
-      # path repository supplies a ^4.1.0 version without git (shallow
+      # path repository supplies a ^4.2.0 version without git (shallow
       # detached checkout, dubious ownership inside the container), and drop
       # the engine VCS repo entry so composer never eagerly clones github.
       - name: Resolve the engine from this checkout (CI-only patch)
@@ -87,19 +102,31 @@ jobs:
           engine = "guard-core-php/composer.json"
           with open(engine) as f:
               d = json.load(f)
-          d["version"] = "4.1.99"
+          d["version"] = "4.2.99"
           with open(engine, "w") as f:
               json.dump(d, f, indent=4)
               f.write("\n")
+
+          # The slim-guard sibling gets the same CI-only version stamp: a
+          # detached checkout carries no version a path repository can
+          # infer, and the consumer's lock pins psr15-guard at 1.2.99.
+          psr15 = "psr15-guard/composer.json"
+          if os.path.isfile(psr15):
+              with open(psr15) as f:
+                  d = json.load(f)
+              d["version"] = "1.2.99"
+              with open(psr15, "w") as f:
+                  json.dump(d, f, indent=4)
+                  f.write("\n")
 
           consumer = "${{ matrix.consumer.path }}/composer.json"
           with open(consumer) as f:
               d = json.load(f)
           # Drop every VCS repo entry (any github fallback hard-fails on
           # anonymous API auth now) and every path entry whose directory is
-          # not checked out in this workspace (slim-guard also carries a
-          # psr15-guard pair whose sibling does not exist here; it resolves
-          # from Packagist instead).
+          # not checked out in this workspace; those resolve from Packagist.
+          # The slim-guard job checks the psr15-guard sibling out above, so
+          # its path pair is kept and installs from the workspace.
           d["repositories"] = [
               repo
               for repo in d.get("repositories", [])
