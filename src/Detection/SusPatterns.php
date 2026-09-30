@@ -67,10 +67,19 @@ final class SusPatterns
     private Preprocessor $preprocessor;
     private float $semanticThreshold;
 
-    public function __construct(float $semanticThreshold = 0.7)
+    /**
+     * The reference wires a PerformanceMonitor into its enhanced detection
+     * state and records one metric per pattern scan plus one per detect()
+     * call (spec 04 "Performance monitoring"); null keeps the monitor off,
+     * the CheckFactory always attaches one.
+     */
+    private ?PerformanceMonitor $performanceMonitor;
+
+    public function __construct(float $semanticThreshold = 0.7, ?PerformanceMonitor $performanceMonitor = null)
     {
         $this->preprocessor = new Preprocessor();
         $this->semanticThreshold = $semanticThreshold;
+        $this->performanceMonitor = $performanceMonitor;
     }
 
     public static function normalizeContext(?string $context): string
@@ -385,6 +394,13 @@ final class SusPatterns
                 $threats[] = $threat;
                 $matchedPatterns[] = $source;
             }
+            $this->performanceMonitor?->recordMetric(
+                pattern: $source,
+                executionTime: $elapsedSeconds,
+                contentLength: Text::len($content),
+                matched: $threat !== null,
+                timeout: $timeoutOccurred
+            );
         }
 
         return [$threats, $matchedPatterns, $timeouts];
@@ -564,6 +580,7 @@ final class SusPatterns
 
     public function detect(string $content, string $ip, string $context): array
     {
+        $executionStartNs = hrtime(true);
         $originalContent = $content;
         $decodeBudgetExhausted = [false];
         [$processedContent, $precomputedDecoded] = $this->preprocessor->preprocessWithDecoded($content, $decodeBudgetExhausted);
@@ -628,6 +645,14 @@ final class SusPatterns
         $threatScore = ($regexThreats === [] && $semanticThreats === []) ? 0.0 : min(max($anomaly, $semanticMax), 1.0);
 
         usort($threats, self::canonicalThreatSort(...));
+
+        $this->performanceMonitor?->recordMetric(
+            pattern: 'overall_detection',
+            executionTime: (hrtime(true) - $executionStartNs) / 1e9,
+            contentLength: Text::len($originalContent),
+            matched: $isThreat,
+            timeout: false
+        );
 
         return [
             'is_threat' => $isThreat,
