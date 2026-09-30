@@ -91,6 +91,31 @@ detection verdict with a flat payload: `check_name`, `reason`, `trigger_info`,
 `passive_mode`, `client_ip`, `path`, `method`, and `status_code`. The hook is
 panic-guarded (throwing hooks are swallowed) and never alters the verdict.
 
+## ReDoS safety gates (section 04)
+
+`preg_*` is PCRE: a backtracking engine with real ReDoS exposure, so every
+detection scan runs behind the spec 04 gates ported from the reference
+(`src/Detection/Redos/`):
+
+- `Prefilters` - the section 04 pattern-safety gate order: dangerous
+  constructs, the compile check, the structural checks, then the probe
+  (`CostArbiter::probeWithTestStrings`, 0.05 s per string, 2.0 s overall,
+  fail closed) or the cost arbiter (`CostArbiter::costVerdict`, timed probe
+  ladder, load-factor normalization, 0.05 s budget, one retry).
+- `ScanGuard` - per-scan execution: `pcre.backtrack_limit` set for the scan
+  with the previous limit restored, `PREG_BACKTRACK_LIMIT_ERROR` /
+  `PREG_RECURSION_LIMIT_ERROR` / `PREG_JIT_STACKLIMIT_ERROR` trips classified
+  as scan timeouts (never 500s), an hrtime deadline, and a canary probe
+  before a plain-pattern scan of a large subject.
+- `SusPatterns` - the per-pattern classification and the reference's timeout
+  semantics: a scan timeout emits a `pattern_timeout` threat
+  ("threats-logged-and-miss") so an engine that could not finish a scan
+  fails closed; scan-window bounded patterns carry no timeout arm, windowed
+  finders run under the full compiler timeout.
+
+`validatePatternSafety` is the custom-rule entry point; `bin/test_redos_gates.php`
+pins the gates, including catastrophic fixtures.
+
 ## Conformance
 
 `php bin/conformance.php` replays the shared JSON fixture corpus
