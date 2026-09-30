@@ -5,6 +5,8 @@ declare(strict_types=1);
 namespace RenzoFranceschini\GuardCore\Pipeline;
 
 use RenzoFranceschini\GuardCore\Config\SecurityConfig;
+use RenzoFranceschini\GuardCore\Events\EventBus;
+use RenzoFranceschini\GuardCore\Events\EventTypes;
 use RenzoFranceschini\GuardCore\Pipeline\CheckFactory;
 use RenzoFranceschini\GuardCore\Request\GuardRequest;
 use RenzoFranceschini\GuardCore\Request\GuardResponse;
@@ -40,7 +42,8 @@ final class SecurityCheckPipeline
         private readonly ?\Closure $rebuildChecks = null,
         private readonly ?\Closure $routeConfigRevision = null,
         private readonly ?\Closure $log = null,
-        private readonly ?\Closure $configProvider = null
+        private readonly ?\Closure $configProvider = null,
+        private readonly ?EventBus $eventBus = null
     ) {
         $this->checks = $checks;
         $this->mutedCheckLogs = array_fill_keys(array_map('strtolower', $mutedCheckLogs), true);
@@ -163,18 +166,51 @@ final class SecurityCheckPipeline
     private function fireBlockHook(SecurityCheck $check, GuardRequest $request, GuardResponse $response): void
     {
         $stash = $request->state()->guardBlockStash;
-        BlockEvents::fire(
-            $this->config()->onBlock,
+        $payload = BlockEvents::buildPayload(
             $request,
-            BlockEvents::buildPayload(
-                $request,
-                $check->checkName(),
-                $stash['reason'] ?? '',
-                $stash['trigger_info'] ?? '',
-                false,
-                $response->statusCode()
-            )
+            $check->checkName(),
+            $stash['reason'] ?? '',
+            $stash['trigger_info'] ?? '',
+            false,
+            $response->statusCode()
         );
+        // The on_block hook is the compatibility layer; the bus emit is the
+        // spec 12 stream (the check-to-event mapping is documented on
+        // blockEventType).
+        BlockEvents::fire($this->config()->onBlock, $request, $payload);
+        $this->eventBus?->sendMiddlewareEvent(
+            self::blockEventType($check->checkName()),
+            $request,
+            'request_blocked',
+            $payload['reason'] !== '' ? $payload['reason'] : 'Request blocked',
+            [
+                'check_name' => $check->checkName(),
+                'trigger_info' => $payload['trigger_info'],
+                'status_code' => $payload['status_code'],
+            ]
+        );
+    }
+
+    /**
+     * The blocked-check to spec 12 event type mapping for the bus emit:
+     * rate_limit -> rate_limited, ip_security -> ip_blocked, user_agent ->
+     * user_agent_blocked, cloud_provider -> cloud_blocked,
+     * suspicious_activity -> suspicious_request, authentication ->
+     * authentication_failed, emergency_mode -> emergency_mode_block, and
+     * everything else -> penetration_attempt.
+     */
+    public static function blockEventType(string $checkName): string
+    {
+        return match ($checkName) {
+            'rate_limit' => EventTypes::EVENT_RATE_LIMITED,
+            'ip_security' => EventTypes::EVENT_IP_BLOCKED,
+            'user_agent' => EventTypes::EVENT_USER_AGENT_BLOCKED,
+            'cloud_provider' => EventTypes::EVENT_CLOUD_BLOCKED,
+            'suspicious_activity' => EventTypes::EVENT_SUSPICIOUS_REQUEST,
+            'authentication' => EventTypes::EVENT_AUTHENTICATION_FAILED,
+            'emergency_mode' => EventTypes::EVENT_EMERGENCY_MODE_BLOCK,
+            default => EventTypes::EVENT_PENETRATION_ATTEMPT,
+        };
     }
 
     private function handleCheckError(SecurityCheck $check, GuardRequest $request, \Throwable $error): ?GuardResponse

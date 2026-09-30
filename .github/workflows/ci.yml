@@ -134,6 +134,9 @@ jobs:
       - name: test_geo_lifecycle
         run: php bin/test_geo_lifecycle.php
 
+      - name: test_event_bus
+        run: php bin/test_event_bus.php
+
   composer-audit:
     name: Composer audit
     runs-on: ubuntu-latest

@@ -185,14 +185,14 @@ $t->throws(InvalidArgumentException::class, fn () => new SecurityConfig(logReque
 $t->same('WARNING', (new SecurityConfig())->logSuspiciousLevel, 'log_suspicious_level default WARNING');
 $t->same(null, (new SecurityConfig())->logRequestLevel, 'log_request_level default null');
 
-$t->section('config: unsupported features fail closed');
-$unsupported = [
-    'agent' => fn () => new SecurityConfig(enableAgent: true),
-    'dynamic rules' => fn () => new SecurityConfig(enableDynamicRules: true),
-];
-foreach ($unsupported as $feature => $fn) {
-    $t->throws(UnsupportedFeatureError::class, $fn, "enabling {$feature} throws UnsupportedFeatureError");
-}
+$t->section('config: agent and dynamic-rule features (spec 12)');
+$enabled = new SecurityConfig(enableAgent: true, enableDynamicRules: true, agentEnableEvents: false, agentEnableMetrics: false);
+$t->same(false, $enabled->agentEnableEvents, 'agent_enable_events honored');
+$t->same(false, $enabled->agentEnableMetrics, 'agent_enable_metrics honored');
+$t->same(true, $enabled->dynamicRulesEnabled, 'enable_dynamic_rules honored');
+$t->same(true, (new SecurityConfig())->agentEnableEvents, 'agent_enable_events default true');
+$t->same(true, (new SecurityConfig())->agentEnableMetrics, 'agent_enable_metrics default true');
+$t->same(false, (new SecurityConfig())->dynamicRulesEnabled, 'enable_dynamic_rules default false');
 $t->same(['AWS'], (new SecurityConfig(blockCloudProviders: ['AWS']))->blockCloudProviders, 'cloud blocking un-gated (m4)');
 
 $t->section('config: revision on mutation');
