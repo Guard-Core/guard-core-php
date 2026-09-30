@@ -641,7 +641,7 @@ detection verdict with a flat payload: <code>check_name</code>, <code>reason</co
 panic-guarded (throwing hooks are swallowed) and never alters the verdict.</p>
 <h2 id="conformance">Conformance</h2>
 <p><code>php bin/conformance.php</code> replays the shared JSON fixture corpus
-(<code>tests/Conformance/guard-core-spec-4.0.2/</code>) generated from the Python engine
+(<code>conformance/guard-core-spec-4.1.0/</code>) generated from the Python engine
 and compares verdicts field by field, so any detector change that would drift
 from the reference fails CI. Never hand-edit expected values or the generated
 tables under <code>src/Support/Generated/</code>.</p>
