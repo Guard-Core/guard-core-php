@@ -56,7 +56,7 @@ tests:
 conformance:
   - changed-files:
       - any-glob-to-any-file:
-          - tests/Conformance/**
+          - conformance/**
           - bin/conformance.php
 
 examples:
