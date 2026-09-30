@@ -8,10 +8,20 @@ use RenzoFranceschini\GuardCore\Ip\CanonicalIp;
 use RenzoFranceschini\GuardCore\Logging\SimpleRequestLogger;
 use RenzoFranceschini\GuardCore\Logging\RequestLogger;
 use RenzoFranceschini\GuardCore\Redis\RedisHandler;
+use RenzoFranceschini\GuardCore\Redis\RedisLock;
 
 final class CloudManager
 {
     public const EMPTY_RANGES_WARNING_COOLDOWN = 300.0;
+
+    /**
+     * The Redis-lock namespace for cross-request single-flight (the
+     * in-flight flag is per-request in FPM; workers that share the
+     * RedisCloudIpStore coordinate through this lock so one cache-miss
+     * thundering herd produces one network fetch per provider).
+     */
+    public const REFRESH_LOCK_NAMESPACE = 'cloud_refresh_lock';
+    public const REFRESH_LOCK_TTL_MS = 15000;
 
     /** @var array<string, array<string, bool>> provider => canonical network => true */
     public array $ipRanges;
@@ -115,7 +125,11 @@ final class CloudManager
             return;
         }
 
+        $lock = $this->redisHandler !== null && $this->redisHandler->isEnabled() && $this->store instanceof RedisCloudIpStore
+            ? new RedisLock($this->redisHandler)
+            : null;
         foreach (CloudProviderRegistry::bareProviderNames($providers) as $provider) {
+            $lockToken = null;
             try {
                 $cached = $this->store->get($provider);
                 if ($cached !== null) {
@@ -125,16 +139,39 @@ final class CloudManager
                     continue;
                 }
 
+                // Cross-request single-flight: when another worker already
+                // holds the provider's fetch lock, re-read the cache once
+                // (the worker may have finished meanwhile) and skip the
+                // network fetch otherwise - the ranges land in the shared
+                // store for the next request. A Redis outage degrades to
+                // the per-request guard (RedisLock is fail-open).
+                if ($lock !== null) {
+                    $lockToken = bin2hex(random_bytes(8));
+                    if (!$lock->acquire(self::REFRESH_LOCK_NAMESPACE, $provider, $lockToken, self::REFRESH_LOCK_TTL_MS)) {
+                        $lockToken = null;
+                        $cached = $this->store->get($provider);
+                        if ($cached !== null) {
+                            [$networks, $regions] = CloudProviderRegistry::decodeCached($cached);
+                            $this->ipRanges[$provider] = $networks;
+                            $this->networkRegions[$provider] = $regions;
+                        }
+
+                        continue;
+                    }
+                }
+
                 [$ranges, $regions] = CloudFetchers::fetchProviderRanges($provider, $this->requireClient());
                 if ($ranges !== []) {
                     $this->store->set($provider, CloudProviderRegistry::encodeCached($ranges, $regions), $ttl);
                     $this->install($provider, $ranges, $regions);
                 }
             } catch (\Throwable $e) {
+                // The constructor pre-seeds every provider's range map, so a
+                // failed refresh leaves the (empty) entry in place.
                 $this->logger->log('error', 'Failed to refresh ' . $provider . ' IP ranges: ' . $e->getMessage());
-                if (!array_key_exists($provider, $this->ipRanges)) {
-                    $this->ipRanges[$provider] = [];
-                    $this->networkRegions[$provider] = [];
+            } finally {
+                if ($lock !== null && $lockToken !== null) {
+                    $lock->release(self::REFRESH_LOCK_NAMESPACE, $provider, $lockToken);
                 }
             }
         }

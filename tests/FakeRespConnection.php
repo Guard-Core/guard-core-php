@@ -90,11 +90,22 @@ final class FakeRespConnection extends RespConnection
             case 'SET':
                 $key = $args[0];
                 $value = $args[1];
+                $nx = false;
                 $px = null;
-                if (count($args) >= 4) {
-                    $px = strtoupper($args[2]) === 'EX'
-                        ? microtime(true) * 1000 + ((int) $args[3]) * 1000
-                        : microtime(true) * 1000 + (int) $args[3];
+                for ($i = 2, $n = count($args); $i < $n; $i++) {
+                    if (strtoupper($args[$i]) === 'NX') {
+                        $nx = true;
+                    } elseif (strtoupper($args[$i]) === 'EX') {
+                        $px = microtime(true) * 1000 + ((int) $args[$i + 1]) * 1000;
+                        $i++;
+                    } elseif (strtoupper($args[$i]) === 'PX') {
+                        $px = microtime(true) * 1000 + (int) $args[$i + 1];
+                        $i++;
+                    }
+                }
+                $this->expireIfNeeded($key);
+                if ($nx && isset($this->store[$key])) {
+                    return null;
                 }
                 $this->store[$key] = ['value' => $value, 'px' => $px];
 

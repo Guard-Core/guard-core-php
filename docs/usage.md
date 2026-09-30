@@ -122,6 +122,26 @@ detection scan runs behind the spec 04 gates ported from the reference
 `validatePatternSafety` is the custom-rule entry point; `bin/test_redos_gates.php`
 pins the gates, including catastrophic fixtures.
 
+## Geo database lifecycle (section 10)
+
+`IpInfoManager` ports the reference IPInfoManager lifecycle: the free
+`country_asn.mmdb` download with an IPInfo token (3 attempts, exponential
+backoff from 1 s), atomic writes, mtime freshness against `maxAge`, the
+Redis-cached database copy (`ipinfo:database`, TTL `maxAge`), the
+never-raising `getCountry`, and the `check_country_access` verdicts with
+their `country_blocked` / `geo_lookup_failed` events. Events go to the
+injectable `eventSink` (the reference sends them to the agent handler).
+
+## Cross-request refresh single-flight
+
+The cloud refresh's in-flight guard is per-request in FPM (specs/impl/php.md).
+Workers that share the `RedisCloudIpStore` additionally coordinate through
+`RedisLock` (`cloud_refresh_lock:{provider}`, SET NX PX 15 s + token-checked
+release): one cache-miss thundering herd produces one network fetch per
+provider, and a worker that loses the race re-reads the cache once and skips
+the fetch. The lock is fail-open: with Redis disabled or erroring, behavior
+degrades to the per-request guard.
+
 ## Conformance
 
 `php bin/conformance.php` replays the shared JSON fixture corpus
