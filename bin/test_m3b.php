@@ -245,7 +245,13 @@ $badTz = m3bPipeline(new SecurityConfig(), ['tz' => new RouteConfig(timeRestrict
 $t->same(null, $badTz->execute(m3bRouteRequest('tz')), 'invalid zone falls back to UTC, inside window');
 $broken = m3bPipeline(new SecurityConfig(), ['broken' => new RouteConfig(timeRestrictions: ['start' => '00:00'])]);
 $t->same(null, $broken->execute(m3bRouteRequest('broken')), 'malformed restrictions fail open (allowed)');
-$never = m3bPipeline(new SecurityConfig(), ['never' => new RouteConfig(timeRestrictions: ['start' => '03:00', 'end' => '04:00'])]);
+// A window two to three hours ahead of the clock is never containing "now",
+// whatever time the suite runs at (the hardcoded 03:00-04:00 window used to
+// make this case flaky for one hour a day).
+$never = m3bPipeline(new SecurityConfig(), ['never' => new RouteConfig(timeRestrictions: [
+    'start' => (new DateTimeImmutable())->modify('+2 hours')->format('H:i'),
+    'end' => (new DateTimeImmutable())->modify('+3 hours')->format('H:i'),
+])]);
 $neverResponse = $never->execute(m3bRouteRequest('never'));
 $t->same(403, $neverResponse?->statusCode(), 'outside window -> 403');
 $t->same('Access not allowed at this time', $neverResponse?->body(), 'time block message');
