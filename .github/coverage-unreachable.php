@@ -137,7 +137,7 @@ return [
     //
     // Text::ordAt decodes via mb_substr over valid UTF-8: lone surrogates
     // U+DC80-DCFF cannot occur (same substitution proof as SusPatterns
-    // 122-123).
+    // 147-148).
     'src/Detection/Pickle.php' => [
         171, 175, 176, 177, 194, 243,
     ],
@@ -162,15 +162,16 @@ return [
         67,
     ],
 
-    // sanitizeForReporting reads Text::ord of a single Text::slice character
-    // (mb_strcut output, always valid UTF-8): surrogates cannot occur.
-    //
-    // A per-pattern scan timeout needs one pattern scan >= 0.9 * 2.0s; the
-    // whole corpus on adversarial inputs up to 840KB stays under 0.2s per
-    // pattern (size-gated recon patterns anchor at \A and cap at 15KB), and
-    // the collected $timeouts are never read by detect() anyway.
+    // sanitizeForReporting reads Text::ord of a single Text::slice
+    // character. The coverage job runs on PHP 8.3, whose mb_substr
+    // substitutes every ill-formed sequence (invalid bytes and encoded
+    // surrogates such as ed b2 80 alike) with the substitute character, so
+    // a sliced character never decodes to U+DC80-DCFF (verified on 8.3).
+    // PHP 8.2's mb_substr preserves those bytes and the branch is live
+    // there (it emits the \xNN reporting escape); the 8.2 matrix jobs run
+    // without pcov.
     'src/Detection/SusPatterns.php' => [
-        122, 123, 361,
+        147, 148,
     ],
 
     // The scheme position comes from an https?:// match, so the anchored
@@ -209,12 +210,6 @@ return [
     // not '{' or '[', so a parsed scalar can never reach it.
     'src/Logging/LogRedactor.php' => [
         225, 231, 243, 245,
-    ],
-
-    // Formats a pattern_timeout threat, but no code path constructs a threat
-    // with that type (grep: only this formatter mentions pattern_timeout).
-    'src/Pipeline/Checks/SuspiciousActivityCheck.php' => [
-        341, 343,
     ],
 
     // The 'unix' trusted-proxy branch requires 'unix' inside

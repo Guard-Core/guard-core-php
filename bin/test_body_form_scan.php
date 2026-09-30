@@ -641,6 +641,29 @@ $budgetResponse = $budgetCheck->check($budgetRequest);
 $t->same(400, $budgetResponse?->statusCode(), 'a decode budget exhaustion threat blocks over route custom categories');
 $t->same(true, str_contains($budgetRequest->state()->guardBlockStash['reason'] ?? '', "Value matched pattern 'decode_budget_exhausted'"), 'the budget exhaustion message formats the pattern');
 
+// A scan that trips the section 04 timeout arm emits a pattern_timeout
+// threat ("threats-logged-and-miss"); the suspicious check formats it with
+// the budget message. The compiler-timeout override puts every windowed or
+// plain scan past the 0.9x heuristic deterministically, no timing luck.
+$previousTimeout = SusPatterns::$compilerTimeoutOverride;
+SusPatterns::$compilerTimeoutOverride = 1e-9;
+try {
+    $timeoutCheck = new SuspiciousActivityCheck(
+        new SecurityConfig(),
+        new GuardResponseFactory(),
+        new SusPatterns(),
+        null,
+        new RouteResolver()
+    );
+    $timeoutRequest = new SimpleGuardRequest(urlPath: '/items', queryParams: ['q' => 'hello world']);
+    $timeoutRequest->state()->clientIp = '9.9.4.8';
+    $timeoutResponse = $timeoutCheck->check($timeoutRequest);
+    $t->same(400, $timeoutResponse?->statusCode(), 'a pattern timeout threat fails closed and blocks');
+    $t->same(true, str_contains($timeoutRequest->state()->guardBlockStash['reason'] ?? '', "Pattern exceeded scan time budget: '"), 'the pattern timeout message formats the pattern');
+} finally {
+    SusPatterns::$compilerTimeoutOverride = $previousTimeout;
+}
+
 $t->section('suspicious check: the suspicious count store evicts oldest ips');
 
 $heavyCheck = makeCheck(new SecurityConfig());
