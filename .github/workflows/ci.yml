@@ -131,6 +131,9 @@ jobs:
       - name: test_performance_monitor
         run: php bin/test_performance_monitor.php
 
+      - name: test_geo_lifecycle
+        run: php bin/test_geo_lifecycle.php
+
   composer-audit:
     name: Composer audit
     runs-on: ubuntu-latest

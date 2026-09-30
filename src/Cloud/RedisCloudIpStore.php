@@ -6,7 +6,7 @@ namespace RenzoFranceschini\GuardCore\Cloud;
 
 use RenzoFranceschini\GuardCore\Redis\RedisHandler;
 
-final class RedisCloudIpStore implements CloudIpStore
+class RedisCloudIpStore implements CloudIpStore
 {
     public function __construct(
         private readonly RedisHandler $redis,

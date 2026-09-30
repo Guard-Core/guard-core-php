@@ -11,7 +11,7 @@ REDIS_HOST ?= host.docker.internal
 # Runners mirrored from CI (.github/workflows/ci.yml). Redis-backed
 # runners are listed in REDIS_RUNNERS and get REDIS_HOST passed through.
 REDIS_RUNNERS = bin/test_ratelimit.php bin/test_geo_rate_limits.php bin/test_pipeline.php bin/test_m3b.php bin/test_m4.php bin/test_behavior.php
-RUNNERS = bin/test_state.php $(REDIS_RUNNERS) bin/test_m3c.php bin/conformance.php bin/conformance_pipeline.php bin/test_nfkc.php bin/test_binary_noise_gate.php bin/test_recon_context_gate.php bin/test_recon_raw_view_scan.php bin/test_body_form_scan.php bin/test_json_walk.php bin/test_exempt_ips.php bin/test_excluded_headers.php bin/test_cors.php bin/test_geo_country.php bin/test_security_headers.php bin/test_behavior.php bin/test_large_body.php bin/test_redos_gates.php bin/test_performance_monitor.php
+RUNNERS = bin/test_state.php $(REDIS_RUNNERS) bin/test_m3c.php bin/conformance.php bin/conformance_pipeline.php bin/test_nfkc.php bin/test_binary_noise_gate.php bin/test_recon_context_gate.php bin/test_recon_raw_view_scan.php bin/test_body_form_scan.php bin/test_json_walk.php bin/test_exempt_ips.php bin/test_excluded_headers.php bin/test_cors.php bin/test_geo_country.php bin/test_security_headers.php bin/test_behavior.php bin/test_large_body.php bin/test_redos_gates.php bin/test_performance_monitor.php bin/test_geo_lifecycle.php
 
 .PHONY: install test lint bump-version clean
 
