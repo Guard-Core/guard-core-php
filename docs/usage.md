@@ -142,6 +142,33 @@ provider, and a worker that loses the race re-reads the cache once and skips
 the fetch. The lock is fail-open: with Redis disabled or erroring, behavior
 degrades to the per-request guard.
 
+## Event bus, metrics, and dynamic rules (section 12)
+
+`GuardEngine::eventBus()` exposes the spec 12 security event bus: blocked
+checks emit their mapped event (`rate_limit` -> `rate_limited`,
+`ip_security` -> `ip_blocked`, `user_agent` -> `user_agent_blocked`,
+`cloud_provider` -> `cloud_blocked`, `suspicious_activity` ->
+`suspicious_request`, `authentication` -> `authentication_failed`,
+`emergency_mode` -> `emergency_mode_block`, anything else ->
+`penetration_attempt`) through the bus while the `on_block` hook stays as
+the compatibility layer. The bus queues until an agent handler (anything
+duck-typed `sendEvent(SecurityEvent)`) attaches via `setAgentHandler()`;
+adapters can also `drain()` the queue. Gating: `agent_enable_events`,
+`EventFilter` muted types. Send failures log and never raise.
+`MetricsCollector` mirrors this for `response_time` / `request_count` /
+`error_rate` under `agent_enable_metrics`.
+
+`DynamicRuleManager` ports the agent-synced dynamic rules: the update flow
+(expiry, staleness gate, updated/applied events), transactional
+application over the immutable config (`SecurityConfig::with()` builds the
+full validated candidate; on any failure the previous config stays
+installed - partial application never survives), last-known persistence
+(Redis `dynamic_rules:last_known` plus an optional atomic file copy), one
+shot hydration at startup, and the `match_event` correlation. With no
+readable store the manager keeps the base config (fail closed). Enable it
+with `enable_dynamic_rules` and hand the manager
+`$engine->applyDynamicConfig(...)` as its `applyConfig` seam.
+
 ## Conformance
 
 `php bin/conformance.php` replays the shared JSON fixture corpus

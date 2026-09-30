@@ -221,6 +221,9 @@ jobs:
       - name: Enforce 100% line coverage
         run: php .github/coverage-runner.php --merge build/coverage-*.php
 
+      - name: test_event_bus
+        run: php bin/test_event_bus.php
+
   composer-audit:
     name: Composer audit
     runs-on: ubuntu-latest

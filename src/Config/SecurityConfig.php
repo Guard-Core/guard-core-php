@@ -134,6 +134,18 @@ final class SecurityConfig
     /** @var list<string> */
     public readonly array $emergencyWhitelist;
 
+    /** The spec 12 event-bus gate (agent_enable_events, default true). */
+    public readonly bool $agentEnableEvents;
+
+    /** The spec 12 metrics gate (agent_enable_metrics, default true). */
+    public readonly bool $agentEnableMetrics;
+
+    /** Whether agent-synced dynamic rules are active (enable_dynamic_rules). */
+    public readonly bool $dynamicRulesEnabled;
+
+    /** Optional atomic file copy of the dynamic rules last-known snapshot. */
+    public readonly ?string $dynamicRulesCachePath;
+
     public readonly bool $emergencyMode;
 
     public readonly bool $enforceHttps;
@@ -300,6 +312,9 @@ final class SecurityConfig
         ?int $corsMaxAge = null,
         ?bool $enableAgent = null,
         ?bool $enableDynamicRules = null,
+        ?bool $agentEnableEvents = null,
+        ?bool $agentEnableMetrics = null,
+        ?string $dynamicRulesCachePath = null,
         ?\Closure $customRequestCheck = null,
         ?\Closure $authVerifier = null,
         ?string $logSuspiciousLevel = null,
@@ -481,12 +496,13 @@ final class SecurityConfig
             $this->geoIpHandler = null;
         }
         $this->geoIpDbPath = $geoIpDbPath;
-        if ($enableAgent === true) {
-            throw new UnsupportedFeatureError('guard agent telemetry');
-        }
-        if ($enableDynamicRules === true) {
-            throw new UnsupportedFeatureError('dynamic rules');
-        }
+        // The agent seam (spec 12) is the event bus and metrics collector:
+        // they gate on agentEnableEvents / agentEnableMetrics and forward
+        // to the duck-typed handler the adapter attaches.
+        $this->agentEnableEvents = $agentEnableEvents ?? true;
+        $this->agentEnableMetrics = $agentEnableMetrics ?? true;
+        $this->dynamicRulesEnabled = $enableDynamicRules ?? false;
+        $this->dynamicRulesCachePath = $dynamicRulesCachePath;
         $this->customRequestCheck = $customRequestCheck;
     }
 
