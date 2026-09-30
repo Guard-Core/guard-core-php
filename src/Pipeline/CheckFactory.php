@@ -8,6 +8,7 @@ use RenzoFranceschini\GuardCore\Ban\IpBanManager;
 use RenzoFranceschini\GuardCore\Behavior\SuspiciousCountStore;
 use RenzoFranceschini\GuardCore\Cloud\CloudManager;
 use RenzoFranceschini\GuardCore\Config\SecurityConfig;
+use RenzoFranceschini\GuardCore\Detection\PerformanceMonitor;
 use RenzoFranceschini\GuardCore\Detection\SusPatterns;
 use RenzoFranceschini\GuardCore\GeoIp\CountryResolver;
 use RenzoFranceschini\GuardCore\Pipeline\Checks\AuthenticationCheck;
@@ -125,7 +126,7 @@ final class CheckFactory
             'suspicious_activity' => new SuspiciousActivityCheck(
                 $config,
                 $this->responseFactory,
-                $this->susPatterns ?? new SusPatterns($config->detectionSemanticThreshold),
+                $this->susPatterns ?? new SusPatterns($config->detectionSemanticThreshold, new PerformanceMonitor()),
                 $this->ipBanManager,
                 $this->routeResolver,
                 $this->suspiciousCountStore

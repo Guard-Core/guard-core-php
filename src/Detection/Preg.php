@@ -22,7 +22,7 @@ final class Preg
         $m = [];
         $ok = @preg_match($pattern, $subject, $m, PREG_OFFSET_CAPTURE);
         if ($ok === false) {
-            throw new PregFailure(preg_last_error_msg());
+            throw new PregFailure(preg_last_error_msg(), preg_last_error());
         }
         if ($ok === 0) {
             return null;
@@ -55,7 +55,7 @@ final class Preg
         $m = [];
         $ok = @preg_match_all($pattern, $subject, $m, PREG_OFFSET_CAPTURE);
         if ($ok === false) {
-            throw new PregFailure(preg_last_error_msg());
+            throw new PregFailure(preg_last_error_msg(), preg_last_error());
         }
         if ($ok === 0) {
             return [];
@@ -97,7 +97,7 @@ final class Preg
         $m = [];
         $ok = @preg_match($anchored, $segment, $m, PREG_OFFSET_CAPTURE);
         if ($ok === false) {
-            throw new PregFailure(preg_last_error_msg());
+            throw new PregFailure(preg_last_error_msg(), preg_last_error());
         }
         if ($ok !== 1) {
             return null;
@@ -132,7 +132,7 @@ final class Preg
         $m = [];
         $ok = @preg_match(self::compile($source, $ignoreCase), $segment, $m, PREG_OFFSET_CAPTURE);
         if ($ok === false) {
-            throw new PregFailure(preg_last_error_msg());
+            throw new PregFailure(preg_last_error_msg(), preg_last_error());
         }
         if ($ok !== 1) {
             return null;
@@ -192,4 +192,17 @@ final class Preg
 
 final class PregFailure extends \RuntimeException
 {
+    /**
+     * preg_last_error() captured at throw time. The ScanGuard classifies
+     * backtrack/recursion trips as scan timeouts; reading the code here
+     * rather than from the process-global state avoids misclassifying a
+     * synthetic failure after an unrelated preg call left a stale code.
+     */
+    public readonly int $pregErrorCode;
+
+    public function __construct(string $message, int $pregErrorCode = PREG_NO_ERROR)
+    {
+        parent::__construct($message);
+        $this->pregErrorCode = $pregErrorCode;
+    }
 }
