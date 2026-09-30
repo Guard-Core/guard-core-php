@@ -388,6 +388,17 @@
 </li>
       
         <li class="md-nav__item">
+  <a href="#redos-safety-gates-section-04" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        ReDoS safety gates (section 04)
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
   <a href="#conformance" class="md-nav__link">
     <span class="md-ellipsis">
       
@@ -508,6 +519,17 @@
     <span class="md-ellipsis">
       
         The block hook
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#redos-safety-gates-section-04" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        ReDoS safety gates (section 04)
       
     </span>
   </a>
@@ -639,6 +661,35 @@ the telemetry seam. The pipeline fires it for every block or passive
 detection verdict with a flat payload: <code>check_name</code>, <code>reason</code>, <code>trigger_info</code>,
 <code>passive_mode</code>, <code>client_ip</code>, <code>path</code>, <code>method</code>, and <code>status_code</code>. The hook is
 panic-guarded (throwing hooks are swallowed) and never alters the verdict.</p>
+<h2 id="redos-safety-gates-section-04">ReDoS safety gates (section 04)</h2>
+<p><code>preg_*</code> is PCRE: a backtracking engine with real ReDoS exposure, so every
+detection scan runs behind the spec 04 gates ported from the reference
+(<code>src/Detection/Redos/</code>):</p>
+<ul>
+<li><code>Prefilters</code> - the section 04 pattern-safety gate order: dangerous
+  constructs, the compile check, the structural checks, then the probe
+  (<code>CostArbiter::probeWithTestStrings</code>, 0.05 s per string, 2.0 s overall,
+  fail closed) or the cost arbiter (<code>CostArbiter::costVerdict</code>, timed probe
+  ladder, load-factor normalization, 0.05 s budget, one retry). The
+  structural gate carries the reference's first two checks (nested
+  unbounded quantifier, adjacent broad unbounded quantifiers); the three
+  remaining reference heuristics are not ported, and the timed
+  probe/arbiter plus the ScanGuard budgets are the enforceable bound
+  either way (the reference itself overrules a structural flag whenever
+  the timing is linear).</li>
+<li><code>ScanGuard</code> - per-scan execution: <code>pcre.backtrack_limit</code> set for the scan
+  with the previous limit restored, <code>PREG_BACKTRACK_LIMIT_ERROR</code> /
+  <code>PREG_RECURSION_LIMIT_ERROR</code> / <code>PREG_JIT_STACKLIMIT_ERROR</code> trips classified
+  as scan timeouts (never 500s), an hrtime deadline, and a canary probe
+  before a plain-pattern scan of a large subject.</li>
+<li><code>SusPatterns</code> - the per-pattern classification and the reference's timeout
+  semantics: a scan timeout emits a <code>pattern_timeout</code> threat
+  ("threats-logged-and-miss") so an engine that could not finish a scan
+  fails closed; scan-window bounded patterns carry no timeout arm, windowed
+  finders run under the full compiler timeout.</li>
+</ul>
+<p><code>validatePatternSafety</code> is the custom-rule entry point; <code>bin/test_redos_gates.php</code>
+pins the gates, including catastrophic fixtures.</p>
 <h2 id="conformance">Conformance</h2>
 <p><code>php bin/conformance.php</code> replays the shared JSON fixture corpus
 (<code>conformance/guard-core-spec-4.1.0/</code>) generated from the Python engine
