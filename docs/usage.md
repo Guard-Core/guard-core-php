@@ -101,7 +101,13 @@ detection scan runs behind the spec 04 gates ported from the reference
   constructs, the compile check, the structural checks, then the probe
   (`CostArbiter::probeWithTestStrings`, 0.05 s per string, 2.0 s overall,
   fail closed) or the cost arbiter (`CostArbiter::costVerdict`, timed probe
-  ladder, load-factor normalization, 0.05 s budget, one retry).
+  ladder, load-factor normalization, 0.05 s budget, one retry). The
+  structural gate carries the reference's first two checks (nested
+  unbounded quantifier, adjacent broad unbounded quantifiers); the three
+  remaining reference heuristics are not ported, and the timed
+  probe/arbiter plus the ScanGuard budgets are the enforceable bound
+  either way (the reference itself overrules a structural flag whenever
+  the timing is linear).
 - `ScanGuard` - per-scan execution: `pcre.backtrack_limit` set for the scan
   with the previous limit restored, `PREG_BACKTRACK_LIMIT_ERROR` /
   `PREG_RECURSION_LIMIT_ERROR` / `PREG_JIT_STACKLIMIT_ERROR` trips classified
