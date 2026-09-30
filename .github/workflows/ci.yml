@@ -125,6 +125,9 @@ jobs:
       - name: test_large_body
         run: php bin/test_large_body.php
 
+      - name: test_redos_gates
+        run: php bin/test_redos_gates.php
+
   composer-audit:
     name: Composer audit
     runs-on: ubuntu-latest

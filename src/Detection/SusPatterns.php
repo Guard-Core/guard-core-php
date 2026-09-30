@@ -4,6 +4,9 @@ declare(strict_types=1);
 
 namespace RenzoFranceschini\GuardCore\Detection;
 
+use RenzoFranceschini\GuardCore\Detection\Redos\Prefilters;
+use RenzoFranceschini\GuardCore\Detection\Redos\ScanGuard;
+use RenzoFranceschini\GuardCore\Detection\Redos\ScanResult;
 use RenzoFranceschini\GuardCore\Support\Generated\PatternData;
 use RenzoFranceschini\GuardCore\Support\Text;
 
@@ -47,6 +50,19 @@ final class SusPatterns
      * really does fire on random binary noise when the gate is off).
      */
     public static bool $binaryNoiseGateEnabled = true;
+
+    /**
+     * Test hook: overrides the compiler timeout (seconds) the section 04
+     * scan gates use, the equivalent of the Python tests constructing the
+     * engine with a custom detection_compiler_timeout. Null keeps the
+     * shipped default.
+     */
+    public static ?float $compilerTimeoutOverride = null;
+
+    private static function compilerTimeout(): float
+    {
+        return self::$compilerTimeoutOverride ?? self::COMPILER_TIMEOUT;
+    }
 
     private Preprocessor $preprocessor;
     private float $semanticThreshold;
@@ -355,10 +371,15 @@ final class SusPatterns
                 && in_array($index, PatternData::SIZE_GATED_PATTERN_INDICES, true)) {
                 continue;
             }
-            $start = microtime(true);
-            $threat = $this->firstAcceptedRegexThreat($source, $content, $category, $validatorContext, $binaryPrefix);
-            if ($threat === null && (microtime(true) - $start) >= 0.9 * self::COMPILER_TIMEOUT) {
+            $startNs = hrtime(true);
+            [$threat, $timeoutOccurred] = $this->scanPattern($source, $category, $content, $validatorContext, $binaryPrefix);
+            $elapsedSeconds = (hrtime(true) - $startNs) / 1e9;
+            if ($timeoutOccurred) {
                 $timeouts[] = $source;
+                self::logPatternTimeout($source);
+                if ($threat === null) {
+                    $threat = self::buildTimeoutThreat($source, $category, $elapsedSeconds);
+                }
             }
             if ($threat !== null) {
                 $threats[] = $threat;
@@ -367,6 +388,106 @@ final class SusPatterns
         }
 
         return [$threats, $matchedPatterns, $timeouts];
+    }
+
+    /**
+     * The exact reference timeout semantics (_suspatterns_regex.py): a
+     * timed-out scan emits a pattern_timeout threat
+     * ("threats-logged-and-miss") unless a real threat was already found,
+     * so an engine that could not finish a scan fails closed instead of
+     * silently passing the value. Shape mirrors _build_timeout_threat.
+     *
+     * @return array<string, mixed>
+     */
+    private static function buildTimeoutThreat(string $source, string $category, float $executionTimeSeconds): array
+    {
+        return [
+            'type' => 'pattern_timeout',
+            'pattern' => $source,
+            'match' => '',
+            'position' => 0,
+            'execution_time' => $executionTimeSeconds,
+            'category' => $category,
+            'weight' => self::resolvePatternWeight($source, $category),
+        ];
+    }
+
+    private static function logPatternTimeout(string $source): void
+    {
+        error_log('[guard_core] Pattern timeout: ' . substr($source, 0, 50)
+            . (strlen($source) > 50 ? '...' : ''));
+    }
+
+    /**
+     * One pattern's scan under the section 04 safety gates, with the
+     * reference's per-pattern classification and its distinct timeout
+     * semantics (_check_regex_pattern):
+     *
+     * - scan-window bounded patterns (SCAN_WINDOW_BOUNDS) run unguarded:
+     *   bounded by construction, they carry no timeout arm in the reference
+     *   either;
+     * - windowed finders (FINDER_KINDS) run under the full compiler timeout
+     *   and the backtrack budget, like the reference's pool-submitted
+     *   finders; an engine-budget or deadline trip reports a timeout;
+     * - plain patterns run under the backtrack budget with the canary probe
+     *   in front (ScanGuard::probeBeforeScan, the arbiter's cost decision
+     *   applied to the value being scanned) and the reference's 0.9x-timeout
+     *   heuristic arm behind: no accepted threat and a wall clock at or over
+     *   0.9x the compiler timeout is a timeout. PREG_BACKTRACK_LIMIT_ERROR
+     *   and PREG_RECURSION_LIMIT_ERROR trips fail closed as timeouts; any
+     *   other preg failure keeps the engine's fail-secure behavior.
+     *
+     * @return array{0: array<string, mixed>|null, 1: bool} [threat, timeoutOccurred]
+     */
+    private function scanPattern(string $source, string $category, string $content, string $validatorContext, ?array $binaryPrefix): array
+    {
+        if (isset(PatternData::SCAN_WINDOW_BOUNDS[$source])) {
+            return [$this->firstAcceptedRegexThreat($source, $content, $category, $validatorContext, $binaryPrefix), false];
+        }
+        if (isset(PatternData::FINDER_KINDS[$source])) {
+            $result = $this->guardedThreat($source, $category, $content, $validatorContext, $binaryPrefix, self::compilerTimeout());
+            if ($result->timedOut) {
+                return [null, true];
+            }
+
+            return [$result->value, false];
+        }
+
+        $canaryTripped = false;
+        if (!isset(PatternData::MATCHER_KINDS[$source]) && strlen($content) > 8192) {
+            $compiled = Prefilters::compileForValidation($source);
+            if (is_string($compiled)) {
+                $canaryTripped = ScanGuard::probeBeforeScan($compiled, $content, 0.9 * self::compilerTimeout());
+            }
+        }
+        if ($canaryTripped) {
+            return [null, true];
+        }
+        $result = $this->guardedThreat($source, $category, $content, $validatorContext, $binaryPrefix, null);
+        if ($result->timedOut) {
+            return [null, true];
+        }
+        if ($result->value === null && $result->elapsedSeconds !== null
+            && $result->elapsedSeconds >= 0.9 * self::compilerTimeout()) {
+            return [null, true];
+        }
+
+        return [$result->value, false];
+    }
+
+    private function guardedThreat(
+        string $source,
+        string $category,
+        string $content,
+        string $validatorContext,
+        ?array $binaryPrefix,
+        ?float $deadlineSeconds
+    ): ScanResult {
+        return ScanGuard::runBounded(
+            fn (): ?array => $this->firstAcceptedRegexThreat($source, $content, $category, $validatorContext, $binaryPrefix),
+            ScanGuard::STOCK_BACKTRACK_BUDGET,
+            $deadlineSeconds
+        );
     }
 
     private function checkDecodedViewPathTraversal(string $processedContent, string $content, string $context): ?array
@@ -515,6 +636,7 @@ final class SusPatterns
             'original_length' => Text::len($originalContent),
             'processed_length' => Text::len($processedContent),
             'detection_method' => 'enhanced',
+            'timeouts' => $timeouts,
         ];
     }
 
