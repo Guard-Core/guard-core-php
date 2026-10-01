@@ -156,7 +156,11 @@ duck-typed `sendEvent(SecurityEvent)`) attaches via `setAgentHandler()`;
 adapters can also `drain()` the queue. Gating: `agent_enable_events`,
 `EventFilter` muted types. Send failures log and never raise.
 `MetricsCollector` mirrors this for `response_time` / `request_count` /
-`error_rate` under `agent_enable_metrics`.
+`error_rate` under `agent_enable_metrics`. With a wired `RedisHandler`
+and no agent handler the collector persists the queue under
+`{prefix}metrics:pending` (a JSON list) so metrics survive across
+requests; attaching a handler or calling `drain()` flushes the backlog
+in order and clears the key. Redis failures log and never raise.
 
 `DynamicRuleManager` ports the agent-synced dynamic rules: the update flow
 (expiry, staleness gate, updated/applied events), transactional

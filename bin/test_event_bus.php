@@ -738,6 +738,86 @@ $quietCollector = new MetricsCollector(new BusAgent(), new SecurityConfig(agentE
 $quietCollector->sendMetric(EventTypes::METRIC_REQUEST_COUNT, 1.0, []);
 $t->same(0, count($quietCollector->drain()), 'the enable gate drops direct sends too');
 
+$t->section('metrics collector redis persistence');
+$metricsRedis = new RedisHandler(true, 'guard_core_metrics_t:', connection: new FakeRespConnection());
+$persistingCollector = new MetricsCollector(null, $config, new EventFilter(), $metricsRedis);
+$persistingCollector->sendMetric(EventTypes::METRIC_REQUEST_COUNT, 1.0, ['endpoint' => '/x']);
+$persistingCollector->sendMetric(EventTypes::METRIC_RESPONSE_TIME, 0.25, ['endpoint' => '/x']);
+$backlog = json_decode((string) $metricsRedis->getKey('metrics', 'pending'), true, 512, JSON_THROW_ON_ERROR);
+$t->same(2, count($backlog), 'metrics persist to the pending backlog across requests');
+$t->same(EventTypes::METRIC_REQUEST_COUNT, $backlog[0]['metric_type'], 'backlog metric type');
+$t->same(0.25, $backlog[1]['value'], 'backlog metric value');
+$t->same('/x', $backlog[0]['tags']['endpoint'], 'backlog metric tags');
+
+$flushAgent = new BusAgent();
+$persistingCollector->setAgentHandler($flushAgent);
+$t->same(2, count($flushAgent->metrics), 'the persisted backlog flushes on handler attach');
+$t->same(0.25, $flushAgent->metrics[1]->value, 'flushed value round trips');
+$t->same('/x', $flushAgent->metrics[0]->tags['endpoint'], 'flushed tags round trip');
+$t->truthy(
+    $flushAgent->metrics[0]->timestamp->format(DateTimeInterface::ATOM) === $backlog[0]['timestamp'],
+    'the persisted timestamp round trips'
+);
+$t->truthy($metricsRedis->getKey('metrics', 'pending') === null, 'the backlog key is cleared by the flush');
+
+$drainingCollector = new MetricsCollector(null, $config, new EventFilter(), $metricsRedis);
+$drainingCollector->sendMetric(EventTypes::METRIC_ERROR_RATE, 1.0, ['endpoint' => '/y']);
+$drainedBacklog = $drainingCollector->drain();
+$t->same(1, count($drainedBacklog), 'drain absorbs the persisted backlog');
+$t->same(EventTypes::METRIC_ERROR_RATE, $drainedBacklog[0]->metricType, 'drained metric type');
+$t->truthy($metricsRedis->getKey('metrics', 'pending') === null, 'drain clears the backlog key');
+$t->same([], $drainingCollector->drain(), 'draining an empty backlog drains empty');
+
+$failPersistFake = new FakeRespConnection();
+$failPersistFake->failWrites = true;
+$failPersistRedis = new RedisHandler(true, 'guard_core_metrics_f:', connection: $failPersistFake);
+$failPersistCollector = new MetricsCollector(null, $config, new EventFilter(), $failPersistRedis);
+$failPersistCollector->sendMetric(EventTypes::METRIC_REQUEST_COUNT, 1.0, []);
+$failPersistFake->failWrites = false;
+$t->truthy($failPersistRedis->getKey('metrics', 'pending') === null, 'a failed persist stores nothing');
+$t->same([], $failPersistCollector->drain(), 'a failed persist drops the metric without raising');
+
+$corruptFake = new FakeRespConnection();
+$corruptRedis = new RedisHandler(true, 'guard_core_metrics_c:', connection: $corruptFake);
+$corruptFake->seed('guard_core_metrics_c:metrics:pending', 'this is not json');
+$corruptCollector = new MetricsCollector(null, $config, new EventFilter(), $corruptRedis);
+$t->same([], $corruptCollector->drain(), 'a corrupted backlog drains empty (fail closed)');
+
+$nonListFake = new FakeRespConnection();
+$nonListRedis = new RedisHandler(true, 'guard_core_metrics_n:', connection: $nonListFake);
+$nonListFake->seed('guard_core_metrics_n:metrics:pending', '{}');
+$nonListCollector = new MetricsCollector(null, $config, new EventFilter(), $nonListRedis);
+$t->same([], $nonListCollector->drain(), 'a non-list backlog payload drains empty');
+
+$scalarPendingFake = new FakeRespConnection();
+$scalarPendingRedis = new RedisHandler(true, 'guard_core_metrics_s:', connection: $scalarPendingFake);
+$scalarPendingFake->seed('guard_core_metrics_s:metrics:pending', '5');
+$scalarPendingCollector = new MetricsCollector(null, $config, new EventFilter(), $scalarPendingRedis);
+$scalarPendingCollector->sendMetric(EventTypes::METRIC_REQUEST_COUNT, 1.0, []);
+$t->truthy($scalarPendingRedis->getKey('metrics', 'pending') === null || $scalarPendingRedis->getKey('metrics', 'pending') === '5', 'a non-list pending payload never accumulates new metrics');
+$t->same([], $scalarPendingCollector->drain(), 'a scalar pending payload drains empty');
+
+$entriesFake = new FakeRespConnection();
+$entriesRedis = new RedisHandler(true, 'guard_core_metrics_e:', connection: $entriesFake);
+$entriesFake->seed('guard_core_metrics_e:metrics:pending', (string) json_encode([
+    ['metric_type' => 'bogus'],
+    ['metric_type' => EventTypes::METRIC_REQUEST_COUNT, 'value' => 2.0, 'tags' => [0 => 5], 'timestamp' => '2026-01-01T00:00:00+00:00'],
+], JSON_THROW_ON_ERROR));
+$entriesCollector = new MetricsCollector(null, $config, new EventFilter(), $entriesRedis);
+$entriesDrained = $entriesCollector->drain();
+$t->same(1, count($entriesDrained), 'malformed backlog entries are skipped individually');
+$t->same(2.0, $entriesDrained[0]->value, 'the valid entry survives');
+$t->same(['0' => '5'], $entriesDrained[0]->tags, 'backlog tag entries are coerced back to string maps');
+
+$quietPersist = new MetricsCollector(null, new SecurityConfig(agentEnableMetrics: false), new EventFilter(), $metricsRedis);
+$quietPersist->sendMetric(EventTypes::METRIC_REQUEST_COUNT, 1.0, []);
+$t->truthy($metricsRedis->getKey('metrics', 'pending') === null, 'the metrics gate also gates persistence');
+
+$disabledRedis = new RedisHandler(false, 'guard_core_metrics_d:', connection: new FakeRespConnection());
+$disabledCollector = new MetricsCollector(null, $config, new EventFilter(), $disabledRedis);
+$disabledCollector->sendMetric(EventTypes::METRIC_REQUEST_COUNT, 1.0, []);
+$t->same(1, count($disabledCollector->drain()), 'a disabled redis handler falls back to the in-memory queue');
+
 $t->section('dynamic rules manager query surface');
 $disabledManager = new DynamicRuleManager(
     config: new SecurityConfig(enableDynamicRules: false),
