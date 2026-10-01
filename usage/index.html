@@ -785,7 +785,11 @@ duck-typed <code>sendEvent(SecurityEvent)</code>) attaches via <code>setAgentHan
 adapters can also <code>drain()</code> the queue. Gating: <code>agent_enable_events</code>,
 <code>EventFilter</code> muted types. Send failures log and never raise.
 <code>MetricsCollector</code> mirrors this for <code>response_time</code> / <code>request_count</code> /
-<code>error_rate</code> under <code>agent_enable_metrics</code>.</p>
+<code>error_rate</code> under <code>agent_enable_metrics</code>. With a wired <code>RedisHandler</code>
+and no agent handler the collector persists the queue under
+<code>{prefix}metrics:pending</code> (a JSON list) so metrics survive across
+requests; attaching a handler or calling <code>drain()</code> flushes the backlog
+in order and clears the key. Redis failures log and never raise.</p>
 <p><code>DynamicRuleManager</code> ports the agent-synced dynamic rules: the update flow
 (expiry, staleness gate, updated/applied events), transactional
 application over the immutable config (<code>SecurityConfig::with()</code> builds the
