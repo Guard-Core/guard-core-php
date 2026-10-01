@@ -35,6 +35,12 @@ final class MmdbReader
      * @throws MmdbError when the file is unreadable, truncated, or not an
      *                   MMDB database
      */
+    /** The metadata node count, the reference entry_count. */
+    public function nodeCount(): int
+    {
+        return $this->nodeCount;
+    }
+
     public function __construct(string $path)
     {
         $data = @file_get_contents($path);

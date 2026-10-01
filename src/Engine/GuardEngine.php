@@ -11,6 +11,7 @@ use RenzoFranceschini\GuardCore\Behavior\SuspiciousCountStore;
 use RenzoFranceschini\GuardCore\Cloud\CloudManager;
 use RenzoFranceschini\GuardCore\Config\SecurityConfig;
 use RenzoFranceschini\GuardCore\Cors\CorsPolicy;
+use RenzoFranceschini\GuardCore\Events\EventBus;
 use RenzoFranceschini\GuardCore\Pipeline\BlockEvents;
 use RenzoFranceschini\GuardCore\Pipeline\CheckFactory;
 use RenzoFranceschini\GuardCore\Pipeline\SecurityCheckPipeline;
@@ -30,11 +31,17 @@ final class GuardEngine
 
     private SecurityConfig $config;
 
+    private ?\Closure $warn;
+
+    private CheckFactory $checkFactory;
+
+    private RateLimitHandler $rateLimitHandler;
+
+    private readonly EventBus $eventBus;
+
     private readonly RedisHandler $redis;
 
     private readonly IpBanManager $banManager;
-
-    private readonly RateLimitHandler $rateLimitHandler;
 
     private readonly ?CloudManager $cloudManager;
 
@@ -59,6 +66,7 @@ final class GuardEngine
         ?\Closure $warn = null,
         ?CloudManager $cloudManager = null
     ) {
+        $this->warn = $warn;
         $this->config = $config;
         $this->redis = $redis ?? new RedisHandler(
             enableRedis: $config->enableRedis,
@@ -67,6 +75,9 @@ final class GuardEngine
             port: (int) (getenv('REDIS_PORT') ?: 6379)
         );
         $this->responseFactory = new GuardResponseFactory();
+        $this->eventBus = new EventBus(null, $config, countryResolver: static function (string $ip) use ($config): ?string {
+            return $config->geoIpHandler?->getCountry($ip);
+        });
         $this->banManager = new IpBanManager($config->trustedProxies, $warn);
         $this->rateLimitHandler = new RateLimitHandler(self::rateLimitConfig($config), warn: $warn);
         $this->cloudManager = $cloudManager ?? ($config->cloudBlockingEnabled() ? new CloudManager() : null);
@@ -84,13 +95,15 @@ final class GuardEngine
             $config->geoIpHandler,
             $this->suspiciousCountStore
         );
+        $this->checkFactory = $checkFactory;
         $this->pipeline = new SecurityCheckPipeline(
             $checkFactory->buildChecks($config),
             $config,
             array_keys($config->mutedCheckLogs),
-            rebuildChecks: fn (): array => $checkFactory->buildChecks($this->config),
+            rebuildChecks: fn (): array => $this->checkFactory->buildChecks($this->config),
             log: $log,
-            configProvider: fn (): SecurityConfig => $this->config
+            configProvider: fn (): SecurityConfig => $this->config,
+            eventBus: $this->eventBus
         );
     }
 
@@ -115,6 +128,45 @@ final class GuardEngine
     public function config(): SecurityConfig
     {
         return $this->config;
+    }
+
+    /**
+     * The spec 12 event bus: blocks emit through it (the on_block hook
+     * stays as the compatibility layer), and adapters attach their
+     * duck-typed agent handler (sendEvent) here or drain the queue.
+     */
+    public function eventBus(): EventBus
+    {
+        return $this->eventBus;
+    }
+
+    /**
+     * The dynamic-rule application seam (DynamicRuleManager's
+     * applyConfig): installs a fully validated config and rebuilds the
+     * pipeline checks for its new revision. Candidates that fail
+     * validation never reach this - the previous config stays installed.
+     */
+    public function applyDynamicConfig(SecurityConfig $config): void
+    {
+        $this->config = $config;
+        // The rate-limit stack bakes the limits into its config, so the
+        // seam rebuilds it (and the check factory that captured it) for
+        // the pipeline rebuild.
+        $this->rateLimitHandler = new RateLimitHandler(self::rateLimitConfig($config), warn: $this->warn);
+        if ($this->redis->isEnabled()) {
+            $this->rateLimitHandler->initializeRedis($this->redis);
+            $this->rateLimitHandler->initializeIpBan($this->banManager);
+        }
+        $this->checkFactory = new CheckFactory(
+            $this->responseFactory,
+            new RouteResolver(),
+            $this->banManager,
+            $this->rateLimitHandler,
+            null,
+            $this->cloudManager,
+            $config->geoIpHandler,
+            $this->suspiciousCountStore
+        );
     }
 
     public function redis(): RedisHandler
