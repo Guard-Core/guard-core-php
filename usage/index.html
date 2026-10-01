@@ -399,6 +399,39 @@
 </li>
       
         <li class="md-nav__item">
+  <a href="#geo-database-lifecycle-section-10" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Geo database lifecycle (section 10)
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#cross-request-refresh-single-flight" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Cross-request refresh single-flight
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#event-bus-metrics-and-dynamic-rules-section-12" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Event bus, metrics, and dynamic rules (section 12)
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
   <a href="#conformance" class="md-nav__link">
     <span class="md-ellipsis">
       
@@ -530,6 +563,39 @@
     <span class="md-ellipsis">
       
         ReDoS safety gates (section 04)
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#geo-database-lifecycle-section-10" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Geo database lifecycle (section 10)
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#cross-request-refresh-single-flight" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Cross-request refresh single-flight
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#event-bus-metrics-and-dynamic-rules-section-12" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Event bus, metrics, and dynamic rules (section 12)
       
     </span>
   </a>
@@ -690,6 +756,46 @@ detection scan runs behind the spec 04 gates ported from the reference
 </ul>
 <p><code>validatePatternSafety</code> is the custom-rule entry point; <code>bin/test_redos_gates.php</code>
 pins the gates, including catastrophic fixtures.</p>
+<h2 id="geo-database-lifecycle-section-10">Geo database lifecycle (section 10)</h2>
+<p><code>IpInfoManager</code> ports the reference IPInfoManager lifecycle: the free
+<code>country_asn.mmdb</code> download with an IPInfo token (3 attempts, exponential
+backoff from 1 s), atomic writes, mtime freshness against <code>maxAge</code>, the
+Redis-cached database copy (<code>ipinfo:database</code>, TTL <code>maxAge</code>), the
+never-raising <code>getCountry</code>, and the <code>check_country_access</code> verdicts with
+their <code>country_blocked</code> / <code>geo_lookup_failed</code> events. Events go to the
+injectable <code>eventSink</code> (the reference sends them to the agent handler).</p>
+<h2 id="cross-request-refresh-single-flight">Cross-request refresh single-flight</h2>
+<p>The cloud refresh's in-flight guard is per-request in FPM (specs/impl/php.md).
+Workers that share the <code>RedisCloudIpStore</code> additionally coordinate through
+<code>RedisLock</code> (<code>cloud_refresh_lock:{provider}</code>, SET NX PX 15 s + token-checked
+release): one cache-miss thundering herd produces one network fetch per
+provider, and a worker that loses the race re-reads the cache once and skips
+the fetch. The lock is fail-open: with Redis disabled or erroring, behavior
+degrades to the per-request guard.</p>
+<h2 id="event-bus-metrics-and-dynamic-rules-section-12">Event bus, metrics, and dynamic rules (section 12)</h2>
+<p><code>GuardEngine::eventBus()</code> exposes the spec 12 security event bus: blocked
+checks emit their mapped event (<code>rate_limit</code> -&gt; <code>rate_limited</code>,
+<code>ip_security</code> -&gt; <code>ip_blocked</code>, <code>user_agent</code> -&gt; <code>user_agent_blocked</code>,
+<code>cloud_provider</code> -&gt; <code>cloud_blocked</code>, <code>suspicious_activity</code> -&gt;
+<code>suspicious_request</code>, <code>authentication</code> -&gt; <code>authentication_failed</code>,
+<code>emergency_mode</code> -&gt; <code>emergency_mode_block</code>, anything else -&gt;
+<code>penetration_attempt</code>) through the bus while the <code>on_block</code> hook stays as
+the compatibility layer. The bus queues until an agent handler (anything
+duck-typed <code>sendEvent(SecurityEvent)</code>) attaches via <code>setAgentHandler()</code>;
+adapters can also <code>drain()</code> the queue. Gating: <code>agent_enable_events</code>,
+<code>EventFilter</code> muted types. Send failures log and never raise.
+<code>MetricsCollector</code> mirrors this for <code>response_time</code> / <code>request_count</code> /
+<code>error_rate</code> under <code>agent_enable_metrics</code>.</p>
+<p><code>DynamicRuleManager</code> ports the agent-synced dynamic rules: the update flow
+(expiry, staleness gate, updated/applied events), transactional
+application over the immutable config (<code>SecurityConfig::with()</code> builds the
+full validated candidate; on any failure the previous config stays
+installed - partial application never survives), last-known persistence
+(Redis <code>dynamic_rules:last_known</code> plus an optional atomic file copy), one
+shot hydration at startup, and the <code>match_event</code> correlation. With no
+readable store the manager keeps the base config (fail closed). Enable it
+with <code>enable_dynamic_rules</code> and hand the manager
+<code>$engine-&gt;applyDynamicConfig(...)</code> as its <code>applyConfig</code> seam.</p>
 <h2 id="conformance">Conformance</h2>
 <p><code>php bin/conformance.php</code> replays the shared JSON fixture corpus
 (<code>conformance/guard-core-spec-4.1.0/</code>) generated from the Python engine
