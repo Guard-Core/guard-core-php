@@ -11,6 +11,7 @@ use RenzoFranceschini\GuardCore\Events\MetricsCollector;
 use RenzoFranceschini\GuardCore\Events\SecurityEvent;
 use RenzoFranceschini\GuardCore\Events\SecurityMetric;
 use RenzoFranceschini\GuardCore\Pipeline\SecurityCheckPipeline;
+use RenzoFranceschini\GuardCore\RateLimit\RateLimitHandler;
 use RenzoFranceschini\GuardCore\Request\SimpleGuardRequest;
 use RenzoFranceschini\GuardCore\Rules\DynamicRuleManager;
 use RenzoFranceschini\GuardCore\Rules\DynamicRules;
@@ -652,6 +653,30 @@ $t->truthy(in_array(EventTypes::EVENT_RATE_LIMITED, $types, true), 'rate limit b
 $t->same(EventTypes::EVENT_RATE_LIMITED, SecurityCheckPipeline::blockEventType('rate_limit'), 'check-to-event mapping: rate_limit');
 $t->same(EventTypes::EVENT_PENETRATION_ATTEMPT, SecurityCheckPipeline::blockEventType('custom'), 'check-to-event mapping default');
 
+$t->section('authentication block emits through the bus');
+$authAgent = new BusAgent();
+$authEngine = new GuardEngine(new SecurityConfig(enableRedis: false, authVerifier: static fn (object $request, string $credential): bool => $credential === 'good-token'));
+$authEngine->eventBus()->setAgentHandler($authAgent);
+$authRequest = new SimpleGuardRequest(method: 'GET', urlPath: '/private', headers: [], clientHost: '203.0.113.21');
+$authRequest->state()->routeConfig = new RenzoFranceschini\GuardCore\Routing\RouteConfig(authRequired: 'bearer');
+$t->same(401, $authEngine->execute($authRequest)?->statusCode(), 'an authentication failure blocks');
+$authTypes = array_map(static fn (object $e): string => $e->eventType, $authAgent->received);
+$t->truthy(in_array(EventTypes::EVENT_AUTHENTICATION_FAILED, $authTypes, true), 'the authentication block emitted authentication_failed through the bus');
+$t->same(EventTypes::EVENT_AUTHENTICATION_FAILED, SecurityCheckPipeline::blockEventType('authentication'), 'check-to-event mapping: authentication');
+
+$t->section('emergency mode block emits through the bus');
+$emergencyAgent = new BusAgent();
+$emergencyEngine = new GuardEngine(new SecurityConfig(enableRedis: false, emergencyMode: true, emergencyWhitelist: ['10.0.0.1']));
+$emergencyEngine->eventBus()->setAgentHandler($emergencyAgent);
+$allowedEmergencyRequest = new SimpleGuardRequest(method: 'GET', urlPath: '/status', headers: [], clientHost: '10.0.0.1');
+$t->same(null, $emergencyEngine->execute($allowedEmergencyRequest), 'a whitelisted ip passes emergency mode');
+$t->same([], $emergencyAgent->received, 'the whitelisted pass emitted nothing');
+$emergencyRequest = new SimpleGuardRequest(method: 'GET', urlPath: '/status', headers: [], clientHost: '203.0.113.22');
+$t->same(503, $emergencyEngine->execute($emergencyRequest)?->statusCode(), 'emergency mode blocks non-whitelisted ips');
+$emergencyTypes = array_map(static fn (object $e): string => $e->eventType, $emergencyAgent->received);
+$t->truthy(in_array(EventTypes::EVENT_EMERGENCY_MODE_BLOCK, $emergencyTypes, true), 'the emergency block emitted emergency_mode_block through the bus');
+$t->same(EventTypes::EVENT_EMERGENCY_MODE_BLOCK, SecurityCheckPipeline::blockEventType('emergency_mode'), 'check-to-event mapping: emergency_mode');
+
 $t->section('engine dynamic config seam rebuilds the pipeline');
 $engine = new GuardEngine(new SecurityConfig(enableRateLimiting: true, rateLimit: 1, rateLimitWindow: 60, enableRedis: false));
 $request = new SimpleGuardRequest(method: 'GET', urlPath: '/a', headers: [], clientHost: '203.0.113.10');
@@ -659,6 +684,29 @@ $engine->execute($request);
 $engine->applyDynamicConfig($engine->config()->with(['rate_limit' => 100]));
 $t->same(null, $engine->execute($request), 'the raised limit applies after the seam swap');
 $t->same(100, $engine->config()->rateLimit, 'the engine config swapped');
+
+$t->section('redis-enabled dynamic config seam wires the rate limit stack');
+$seamFake = new FakeRespConnection();
+$redisEngine = new GuardEngine(
+    new SecurityConfig(enableRedis: true, enableRateLimiting: true, rateLimit: 1, rateLimitWindow: 60),
+    new RedisHandler(true, 'guard_core_dynseam:', connection: $seamFake)
+);
+$redisEngine->applyDynamicConfig($redisEngine->config()->with(['rate_limit' => 100]));
+$seamRedisWiring = new ReflectionProperty(RateLimitHandler::class, 'redisHandler');
+$seamBanWiring = new ReflectionProperty(RateLimitHandler::class, 'ipBanManager');
+$t->truthy($seamRedisWiring->getValue($redisEngine->rateLimitHandler()) === $redisEngine->redis(), 'the rebuilt handler is wired to the engine redis');
+$t->truthy($seamBanWiring->getValue($redisEngine->rateLimitHandler()) === $redisEngine->banManager(), 'the rebuilt handler is wired to the ban manager');
+$t->truthy($redisEngine->rateLimitHandler()->scriptSha() !== null, 'the rate limit script loaded through the engine redis');
+$t->same(100, $redisEngine->config()->rateLimit, 'the redis-enabled engine config swapped');
+
+$t->section('processResponse without a behavior processor');
+$bareEngine = (new ReflectionClass(GuardEngine::class))->newInstanceWithoutConstructor();
+$processorSlot = new ReflectionProperty(GuardEngine::class, 'behavioralProcessor');
+$processorSlot->setValue($bareEngine, null);
+$t->same(null, $bareEngine->behaviorProcessor(), 'the engine reports no behavior processor');
+$bareRequest = new SimpleGuardRequest(method: 'GET', urlPath: '/x', headers: [], clientHost: '203.0.113.23');
+$bareEngine->processResponse($bareRequest, null);
+$t->truthy(true, 'processResponse with no processor returns cleanly');
 
 
 // ---------------------------------------------------------------------

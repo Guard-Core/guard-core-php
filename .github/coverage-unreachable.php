@@ -57,28 +57,17 @@ return [
         112,
     ],
 
-    // The constructor pre-seeds ipRanges/networkRegions for every registry
-    // provider (array_fill_keys(PROVIDERS, []), lines 45-46), and every
-    // internal caller passes registry-validated provider lists
-    // (SecurityConfig::validateBlockCloudProviders), so the post-catch
-    // !array_key_exists guards are always false.
-    //
-    // details() walks bareProviderNames of the same registry-validated
-    // lists: a bare name is always a PROVIDERS member, hence a pre-seeded
-    // key, so the skip never runs.
-    'src/Cloud/CloudManager.php' => [
-        136, 137, 190, 191, 307,
-    ],
-
     // curl_init only fails when the cURL extension is missing.
     'src/Cloud/CurlHttpClient.php' => [
         22,
     ],
 
     // Bare-string guards behind ?array parameters: PHP rejects a string
-    // argument with a TypeError before the body runs.
+    // argument with a TypeError before the body runs (verified via
+    // ReflectionMethod::invoke: "Argument #1 ($names) must be of type
+    // ?array, string given").
     'src/Config/SecurityConfig.php' => [
-        881, 905,
+        897, 921,
     ],
 
     // mb_substitute_character(0xfffd) makes mb_convert_encoding(UTF-8,
@@ -178,12 +167,6 @@ return [
     // re-check at the same offset always succeeds.
     'src/Detection/XmlXxe.php' => [
         104,
-    ],
-
-    // The constructor always builds the BehavioralProcessor (line 76), so
-    // the null guard is dead.
-    'src/Engine/GuardEngine.php' => [
-        180,
     ],
 
     // canonicalNetwork re-runs inet_pton on an address canonicalText already

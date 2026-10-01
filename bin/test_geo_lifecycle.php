@@ -745,6 +745,46 @@ $failingManager->initializeRedis(new RedisHandler(true, 'guard_core_cloud5:', co
 $t->same(false, $failingManager->isCloudIp('203.0.113.5', ['AWS']), 'a failing store leaves the provider unblocked');
 $t->same(false, $failingManager->getStatus()['AWS']['ready'], 'the provider entry exists but is not ready');
 
+$t->section('refresh failure for a provider with no prior ranges');
+// The fetchers swallow their own network errors, so the redis-handler
+// refresh catch is reached through a failing cache write after a good
+// fetch: failWrites makes setKey raise GuardRedisException.
+$cloudOkStub = new LifecycleStubClient([new HttpResponse(200, (string) json_encode([
+    'prefixes' => [
+        ['ip_prefix' => '203.0.113.0/24', 'region' => 'us-east-1', 'service' => 'AMAZON'],
+    ],
+]))]);
+$cloudFailFake = new FakeRespConnection();
+$cloudFailFake->failWrites = true;
+$cloudFailRedis = new RedisHandler(true, 'guard_core_cloud6:', connection: $cloudFailFake);
+$failLogger = new SimpleRequestLogger();
+$noRangesManager = new CloudManager($cloudOkStub, null, $failLogger);
+$noRangesManager->initializeRedis($cloudFailRedis, [], 3600);
+// Drop the store so refreshAsync takes the redis-handler path, and remove
+// the provider's pre-seeded entry so the fallback initializes it fresh.
+$noRangesManager->setStore(null);
+unset($noRangesManager->ipRanges['AWS']);
+$noRangesManager->refreshAsync(['AWS'], 3600);
+$t->truthy(array_key_exists('AWS', $noRangesManager->ipRanges), 'the failed refresh initialized the provider range entry');
+$t->same([], $noRangesManager->ipRanges['AWS'], 'the failed refresh left no ranges');
+$t->truthy(array_key_exists('AWS', $noRangesManager->networkRegions), 'the failed refresh initialized the provider region entry');
+$t->same([], $noRangesManager->networkRegions['AWS'], 'the failed refresh left no regions');
+$t->same(false, $noRangesManager->isCloudIp('203.0.113.5', ['AWS']), 'the initialized empty entry fails open');
+$t->truthy((bool) array_filter($failLogger->records(), static fn (array $r): bool => str_contains($r['message'], 'Failed to refresh AWS IP ranges')), 'the refresh failure is logged');
+
+$t->section('cloud match against a provider with no loaded ranges');
+$loadedStub = new LifecycleStubClient([new HttpResponse(200, (string) json_encode([
+    'prefixes' => [
+        ['ip_prefix' => '203.0.113.0/24', 'region' => 'us-east-1', 'service' => 'AMAZON'],
+    ],
+]))]);
+$loadedFake = new FakeRespConnection();
+$loadedRedis = new RedisHandler(true, 'guard_core_cloud7:', connection: $loadedFake);
+$loadedManager = new CloudManager($loadedStub, new RedisCloudIpStore($loadedRedis), new SimpleRequestLogger());
+$loadedManager->initializeRedis($loadedRedis, ['AWS'], 3600);
+$t->same(['AWS', '203.0.113.0/24'], $loadedManager->getCloudProviderDetails('203.0.113.5', ['AWS']), 'a loaded provider resolves its network');
+$t->same(null, $loadedManager->getCloudProviderDetails('203.0.113.5', ['Oracle']), 'a provider with no ranges entry is skipped in the match');
+
 $t->section('verdicts without an event sink stay silent');
 $noSink = new IpInfoManager(
     token: 'test-token',
