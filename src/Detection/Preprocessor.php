@@ -34,7 +34,7 @@ final class Preprocessor
         'onerror\s*=',
         'onload\s*=',
         '\$\{',
-        '\\x[0-9a-fA-F]{2}',
+        '\\\\x[0-9a-fA-F]{2}',
         '%[0-9a-fA-F]{2}',
         '`',
         '\$\(',
