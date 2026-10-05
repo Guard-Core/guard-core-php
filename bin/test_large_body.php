@@ -125,13 +125,16 @@ foreach (glob(__DIR__ . '/../conformance/guard-core-spec-4.1.0/cases/*.json') ?:
     $suite = json_decode((string) file_get_contents($file), true, 512, JSON_THROW_ON_ERROR);
     foreach ($suite['cases'] ?? [] as $case) {
         $size = strlen((string) ($case['input']['content'] ?? ''));
-        // The binary-body vector file intentionally carries subjects above the
-        // gate: those verdicts ride the binary-noise island path (their exact
-        // outcomes are pinned by bin/conformance.php), not the gated
-        // line-walk family, so they are tracked separately from the
-        // below-gate invariant the text corpus must keep.
+        // Two suites intentionally carry subjects above the gate and are
+        // tracked separately from the below-gate invariant the standard text
+        // corpus must keep: binary_bodies.json (verdicts ride the
+        // binary-noise island path) and cost_bodies.json (the cost-parity
+        // suite is large by design; its verdicts, gate behavior included,
+        // are pinned by bin/conformance.php and bin/conformance_cost.php).
         if (basename($file) === 'binary_bodies.json') {
             $binaryCorpusMax = max($binaryCorpusMax, $size);
+        } elseif (basename($file) === 'cost_bodies.json') {
+            continue;
         } else {
             $corpusMax = max($corpusMax, $size);
         }
