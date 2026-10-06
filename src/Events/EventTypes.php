@@ -97,6 +97,26 @@ final class EventTypes
         self::EVENT_PATTERN_ANOMALY_STATISTICAL_ANOMALY,
     ];
 
+    // Enrichment metadata keys (event_types.py ENRICHMENT_KEY_*): the
+    // guard.* family the EventEnricher stamps onto every event metadata bag
+    // and every metric tags bag.
+
+    public const ENRICHMENT_KEY_PROJECT_ID = 'guard.project_id';
+
+    public const ENRICHMENT_KEY_SERVICE_NAME = 'guard.service.name';
+
+    public const ENRICHMENT_KEY_DEPLOYMENT_ENV = 'guard.deployment.environment';
+
+    public const ENRICHMENT_KEY_THREAT_SCORE = 'guard.threat_score';
+
+    public const ENRICHMENT_KEY_RULE_ID = 'guard.rule.id';
+
+    public const ENRICHMENT_KEY_RULE_VERSION = 'guard.rule.version';
+
+    public const ENRICHMENT_KEY_BEHAVIOR_KEY = 'guard.behavior.correlation_key';
+
+    public const ENRICHMENT_KEY_RECENT_EVENT_COUNT = 'guard.behavior.recent_event_count';
+
     // Metric type identifiers (event_types.py).
 
     public const METRIC_RESPONSE_TIME = 'response_time';
