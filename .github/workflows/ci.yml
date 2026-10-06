@@ -225,7 +225,7 @@ jobs:
         run: |
           mkdir -p build
           php .github/coverage-runner.php --collect bin/test_state.php build/coverage-test_state.php --integration
-          for suite in test_ratelimit test_geo_rate_limits test_pipeline test_m3b test_m4 test_behavior test_m3c conformance conformance_safety conformance_events conformance_redis test_nfkc test_binary_noise_gate test_recon_context_gate test_recon_raw_view_scan test_body_form_scan test_json_walk test_exempt_ips test_excluded_headers test_cors test_geo_country test_geo_lifecycle test_event_bus test_security_headers test_large_body test_support test_redos_gates test_performance_monitor; do
+          for suite in test_parity_seam test_ratelimit test_geo_rate_limits test_pipeline test_m3b test_m4 test_behavior test_m3c conformance conformance_safety conformance_events conformance_redis test_nfkc test_binary_noise_gate test_recon_context_gate test_recon_raw_view_scan test_body_form_scan test_json_walk test_exempt_ips test_excluded_headers test_cors test_geo_country test_geo_lifecycle test_event_bus test_security_headers test_large_body test_support test_redos_gates test_performance_monitor; do
             php .github/coverage-runner.php --collect "bin/${suite}.php" "build/coverage-${suite}.php"
           done
 
