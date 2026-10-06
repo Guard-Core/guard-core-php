@@ -45,6 +45,9 @@ final class GuardEngine
 
     private readonly ?CloudManager $cloudManager;
 
+    /** @var array<string, array{enabled?: bool, ok: bool, error: ?string}> */
+    private array $initializationStatus = [];
+
     private readonly ?CorsPolicy $corsPolicy;
 
     private readonly SuspiciousCountStore $suspiciousCountStore;
@@ -138,6 +141,18 @@ final class GuardEngine
     public function eventBus(): EventBus
     {
         return $this->eventBus;
+    }
+
+    /**
+     * Attach a duck-typed agent handler (sendEvent(object $event): void,
+     * e.g. GuardAgent) to the event bus. Events emitted before this call
+     * are queued in the bus and drain on attach. Mirrors the reference
+     * adapter wiring where the middleware passes the agent handler at
+     * construction.
+     */
+    public function setAgentHandler(object $agentHandler): void
+    {
+        $this->eventBus->setAgentHandler($agentHandler);
     }
 
     /**
@@ -261,18 +276,59 @@ final class GuardEngine
 
     public function initialize(): void
     {
+        $status = [
+            'redis' => ['enabled' => $this->redis->isEnabled(), 'ok' => true, 'error' => null],
+            'ip_ban' => ['ok' => true, 'error' => null],
+            'rate_limit' => ['ok' => true, 'error' => null],
+            'cloud_provider' => [
+                'enabled' => $this->cloudManager !== null,
+                'ok' => true,
+                'error' => null,
+            ],
+        ];
         if (!$this->redis->isEnabled()) {
             $this->banManager->initializeRedis(null);
             $this->rateLimitHandler->initializeRedis(null);
+            $this->initializationStatus = $status;
 
             return;
         }
 
-        $this->redis->initialize();
-        $this->banManager->initializeRedis($this->redis);
-        $this->rateLimitHandler->initializeRedis($this->redis);
-        $this->rateLimitHandler->initializeIpBan($this->banManager);
-        $this->cloudManager?->initializeRedis($this->redis, ttl: $this->config->cloudIpRefreshInterval);
+        try {
+            $this->redis->initialize();
+        } catch (\Throwable $e) {
+            $status['redis']['ok'] = false;
+            $status['redis']['error'] = $e->getMessage();
+            $this->initializationStatus = $status;
+            // Fail-closed contract preserved: the original exception still
+            // throws (adapters rethrow when redis_fail_open is false) - the
+            // status snapshot just records where initialization stopped.
+            throw $e;
+        }
+        try {
+            $this->banManager->initializeRedis($this->redis);
+            $this->rateLimitHandler->initializeRedis($this->redis);
+            $this->rateLimitHandler->initializeIpBan($this->banManager);
+            $this->cloudManager?->initializeRedis($this->redis, ttl: $this->config->cloudIpRefreshInterval);
+        } catch (\Throwable $e) {
+            $status['ip_ban']['ok'] = false;
+            $status['ip_ban']['error'] = $e->getMessage();
+            $this->initializationStatus = $status;
+            throw $e;
+        }
+        $this->initializationStatus = $status;
+    }
+
+    /**
+     * What initialize() reached and where it stopped, for the adapters'
+     * status route (mirrors fastapi-guard get_initialization_status):
+     * per-component enabled/ok/error. A component reports ok=false when
+     * its initialization threw; fail-closed engines throw through, so a
+     * present status always means the engine object exists.
+     */
+    public function initializationStatus(): array
+    {
+        return $this->initializationStatus;
     }
 
     /**

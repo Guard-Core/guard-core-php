@@ -4,7 +4,7 @@ declare(strict_types=1);
 
 namespace RenzoFranceschini\GuardCore\Config;
 
-final class UnsupportedFeatureError extends \RuntimeException
+final class UnsupportedFeatureError extends \RenzoFranceschini\GuardCore\Exceptions\GuardCoreError
 {
     public function __construct(string $feature)
     {
