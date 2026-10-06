@@ -200,6 +200,24 @@ try {
 }
 $t->truthy($threw, 'non-string otel_resource_attributes values rejected');
 
+$threw = false;
+try {
+    new SecurityConfig(logSensitiveHeaders: 'user-agent');
+} catch (\TypeError) {
+    // PHP rejects the string at the typed ?array call boundary, before
+    // validateSensitiveSet's own bare-string guard can run.
+    $threw = true;
+}
+$t->truthy($threw, 'a bare string log_sensitive_headers rejected at the typed boundary');
+
+$threw = false;
+try {
+    new SecurityConfig(excludedDetectionParams: 'q');
+} catch (\TypeError) {
+    $threw = true;
+}
+$t->truthy($threw, 'a bare string excluded_detection_params rejected at the typed boundary');
+
 $closure = LogSetup::engineLogClosure(new SecurityConfig(logFormat: 'json'));
 $t->truthy($closure instanceof Closure, 'engine log closure factory returns a closure');
 $threw = false;

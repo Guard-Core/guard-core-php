@@ -255,4 +255,38 @@ return [
     'src/Events/EventEnricher.php' => [
         85, 86, 88,
     ],
+
+    // The bare-string guards inside validateSensitiveSet (974) and
+    // validateExclusionSet (998) sit behind typed ?array constructor
+    // parameters: PHP raises the TypeError at the call boundary, so a
+    // string can never reach the is_string($names) checks (the same shape
+    // as the BehaviorRule entry above). The suites assert the boundary
+    // TypeError instead (test_json_logging.php).
+    'src/Config/SecurityConfig.php' => [
+        974, 998,
+    ],
+
+    // 219: the non-array/non-scalar json_decode guard - json_decode can
+    // only return array|null|scalar, so `!is_array && !== null &&
+    // !is_scalar` is a contradiction over its own output space.
+    // 240-243: checkResponsePattern's catch is defensive parity with the
+    // reference's try/except; every primitive inside (json_decode,
+    // str_starts_with, substr, the preg_match-false arm handled at its
+    // call site, strtolower) answers without throwing under the guarded
+    // inputs (config construction rejects bodies/patterns that could make
+    // PCRE raise).
+    'src/Behavior/BehaviorTracker.php' => [
+        219, 240, 241, 242, 243,
+    ],
+
+    // 313-317: the ip_ban-side initialization catch. Every collaborator
+    // inside the try fails open or swallows: RateLimitHandler::
+    // initializeRedis wraps scriptLoad in its own catch, initializeIpBan
+    // only assigns the manager, IpBanManager::initializeRedis migrates
+    // legacy keys under its own catch, and CloudManager::initializeRedis
+    // refreshes through the single-flight path that logs its own
+    // failures - no input steers a Throwable out of the block.
+    'src/Engine/GuardEngine.php' => [
+        313, 314, 315, 316, 317,
+    ],
 ];
