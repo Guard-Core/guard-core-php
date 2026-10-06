@@ -253,6 +253,27 @@ $input = enrichEvent();
 $enriched = $exploding->enrichEvent($input);
 $t->same($input, $enriched, 'correlation failure returns the event unenriched (atomic copy semantics)');
 
+$t->section('idempotence + degenerate inputs');
+$frozenClock = static fn (): float => 42.0;
+$frozenEnricher = new EventEnricher(new EnrichmentContext(
+    config: new SecurityConfig(otelServiceName: 'svc'),
+    behaviorTracker: new TrackerFake(2),
+    clock: $frozenClock
+));
+$once = enrichEvent(ip: '198.51.100.5');
+$enrichedOnce = $frozenEnricher->enrichEvent($once);
+$twice = $frozenEnricher->enrichEvent($enrichedOnce);
+$t->same($enrichedOnce, $twice, 'enriching an enriched event returns the same instance untouched (fixed clock)');
+$frozenMetric = new SecurityMetric(new DateTimeImmutable(), EventTypes::METRIC_REQUEST_COUNT, 1.0, []);
+$metricOnce = $frozenEnricher->enrichMetric($frozenMetric);
+$t->same($metricOnce, $frozenEnricher->enrichMetric($metricOnce), 'enriching an enriched metric returns the same instance untouched');
+$emptyType = $plainEnricher->enrichEvent(enrichEvent(''));
+$t->truthy(!isset($emptyType->metadata[EventTypes::ENRICHMENT_KEY_THREAT_SCORE]), 'an empty event type carries no threat score');
+$t->truthy(isset($emptyType->metadata[EventTypes::ENRICHMENT_KEY_SERVICE_NAME]), 'an empty event type still carries identity');
+
+// The metric catch path is defensive (identity on a validated string map
+// cannot throw); it is waived in .github/coverage-unreachable.php.
+
 // ---------------------------------------------------------------------
 // 6. BehaviorTracker.getRecentEventCount
 // ---------------------------------------------------------------------

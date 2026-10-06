@@ -84,6 +84,14 @@ final class Sink
 
     public bool $failEvent = false;
 
+    public bool $failMetric = false;
+
+    public bool $failRedis = false;
+
+    public bool $failStop = false;
+
+    public bool $failFlush = false;
+
     public function __construct(public readonly string $name = 'Sink')
     {
     }
@@ -98,11 +106,17 @@ final class Sink
 
     public function sendMetric(SecurityMetric $metric): void
     {
+        if ($this->failMetric) {
+            throw new RuntimeException("{$this->name} metric down");
+        }
         $this->metrics[] = $metric;
     }
 
     public function initializeRedis(object $redisHandler): void
     {
+        if ($this->failRedis) {
+            throw new RuntimeException("{$this->name} redis down");
+        }
         $this->redis[] = $redisHandler;
     }
 
@@ -113,11 +127,17 @@ final class Sink
 
     public function stop(): void
     {
+        if ($this->failStop) {
+            throw new RuntimeException("{$this->name} stop down");
+        }
         $this->stopped++;
     }
 
     public function flushBuffer(): void
     {
+        if ($this->failFlush) {
+            throw new RuntimeException("{$this->name} flush down");
+        }
         $this->flushed++;
     }
 
@@ -286,6 +306,13 @@ $composite->sendEvent(evt(EventTypes::EVENT_RATE_LIMITED));
 $t->same(2, count($b->events), 'a dead sink does not stop the fan-out');
 $a->failEvent = false;
 
+$t->section('composite metric failure isolation');
+$a->failMetric = true;
+$composite->sendMetric(met());
+$t->same(1, count($b->metrics), 'a failing metric sink does not stop the metric fan-out');
+$t->truthy(isset($b->metrics[0]->tags[EventTypes::ENRICHMENT_KEY_PROJECT_ID]), 'the metric fan-out sees the enriched instance');
+$a->failMetric = false;
+
 $t->section('composite lifecycle');
 $lifecycle = new CompositeAgentHandler([$a, $b]);
 $t->truthy(!$lifecycle->started(), 'composite starts unstarted');
@@ -320,6 +347,20 @@ $t->same(1, $a->flushed, 'flush fans out');
 $redisMarker = new stdClass();
 $lifecycle->initializeRedis($redisMarker);
 $t->same([$redisMarker], $a->redis, 'initialize_redis fans out');
+
+$t->section('lifecycle failure isolation');
+$a->failRedis = true;
+$lifecycle->initializeRedis(new stdClass());
+$t->same(2, count($b->redis), 'a failing redis sink does not stop the redis fan-out');
+$a->failRedis = false;
+$a->failStop = true;
+$lifecycle->stop();
+$t->same(2, $b->stopped, 'a failing stop does not stop the other sinks');
+$a->failStop = false;
+$a->failFlush = true;
+$lifecycle->flushBuffer();
+$t->same(2, $b->flushed, 'a failing flush does not stop the other sinks');
+$a->failFlush = false;
 
 $t->section('composite dynamic rules + health');
 $rules = new CompositeAgentHandler([new RulesSink(null, true), new RulesSink(['k' => 'v']), new RulesSink('second')]);
@@ -404,8 +445,13 @@ $t->same(32, strlen($span3['traceId'] ?? ''), 'malformed traceparent falls back 
 $t->truthy(!isset($span3['parentSpanId']), 'malformed traceparent leaves no parent');
 
 $t->section('otel metric export');
-$otel->sendMetric(met(EventTypes::METRIC_RESPONSE_TIME, 0.75));
-$metricPayload = $transport->decoded(3)['resourceMetrics'][0]['scopeMetrics'][0]['metrics'][0] ?? [];
+$otel->sendMetric(new SecurityMetric(
+    timestamp: new DateTimeImmutable(),
+    metricType: EventTypes::METRIC_RESPONSE_TIME,
+    value: 0.75,
+    tags: ['endpoint' => '/pay', 'method' => 'GET']
+));
+$metricPayload = $transport->decoded(count($transport->exports) - 1)['resourceMetrics'][0]['scopeMetrics'][0]['metrics'][0] ?? [];
 $t->same('guard.request.duration', $metricPayload['name'] ?? null, 'response_time maps to the duration histogram');
 $t->same('s', $metricPayload['unit'] ?? null, 'histogram unit is seconds');
 $histogramPoint = $metricPayload['histogram']['dataPoints'][0] ?? [];
@@ -416,6 +462,7 @@ foreach (($histogramPoint['attributes'] ?? []) as $attr) {
     $metricAttrs[$attr['key']] = $attr['value']['stringValue'] ?? null;
 }
 $t->same('/pay', $metricAttrs['endpoint'] ?? null, 'metric attributes carry the endpoint');
+$t->same('GET', $metricAttrs['method'] ?? null, 'extra tags join the metric attributes');
 $t->truthy(!isset($metricAttrs['value']), 'the value tag is not echoed into attributes');
 
 $otel->sendMetric(met(EventTypes::METRIC_REQUEST_COUNT, 3.0));
@@ -430,10 +477,42 @@ $beforeUnknown = count($transport->exports);
 $otel->sendMetric(met('not_a_metric', 1.0));
 $t->same($beforeUnknown, count($transport->exports), 'unknown metric type exports nothing');
 
+$t->section('otel enrichment attribute types + no-op surface');
+$typedEvent = new SecurityEvent(
+    timestamp: new DateTimeImmutable(),
+    eventType: EventTypes::EVENT_SUSPICIOUS_REQUEST,
+    ipAddress: '203.0.113.7',
+    metadata: [
+        'guard.threat_score' => 50,
+        'guard.ratio' => 0.5,
+        'guard.flag' => true,
+        'guard.absent' => null,
+        'traceparent' => 123,
+    ]
+);
+$otel->sendEvent($typedEvent);
+$typedSpan = $transport->decoded(count($transport->exports) - 1)['resourceSpans'][0]['scopeSpans'][0]['spans'][0] ?? [];
+$typedAttrs = [];
+foreach (($typedSpan['attributes'] ?? []) as $attr) {
+    $typedAttrs[$attr['key']] = $attr['value'];
+}
+$t->same(50, $typedAttrs[EventTypes::ENRICHMENT_KEY_THREAT_SCORE]['intValue'] ?? null, 'int metadata forwards as intValue');
+$t->same(0.5, $typedAttrs['guard.ratio']['doubleValue'] ?? null, 'float metadata forwards as doubleValue');
+$t->truthy(isset($typedAttrs['guard.flag']['boolValue']), 'bool metadata forwards as boolValue');
+$t->truthy(!isset($typedAttrs['guard.absent']), 'null metadata entries are skipped');
+$t->truthy(!isset($typedAttrs['traceparent']), 'a non-string traceparent is ignored for parenting');
+$t->same(32, strlen($typedSpan['traceId'] ?? ''), 'non-string traceparent falls back to a generated traceId');
+
+$t->same(null, $otel->getDynamicRules(), 'otel getDynamicRules is null');
+$otel->initializeRedis(new stdClass());
+$otel->flushBuffer();
+$t->truthy(true, 'otel redis/flush are no-ops');
+
 $t->section('otel stop + failure tolerance');
+$exportsBeforeStop = count($transport->exports);
 $otel->stop();
 $otel->sendEvent(evt());
-$t->same($beforeUnknown, count($transport->exports), 'no export after stop');
+$t->same($exportsBeforeStop, count($transport->exports), 'no export after stop');
 $failingTransport = new TransportFake();
 $failingTransport->fail = true;
 $failing = new OtelHandler(new SecurityConfig(otelExporterEndpoint: 'https://collector:4318'), $failingTransport);
@@ -492,12 +571,23 @@ $t->same('proj-9', $span['attributes'][EventTypes::ENRICHMENT_KEY_PROJECT_ID] ??
 $t->truthy(!isset($span['attributes']['traceparent']), 'traceparent never forwarded');
 $t->truthy(!isset($span['attributes']['custom']), 'non-guard metadata not forwarded');
 
-$emitter->sendMetric(met(EventTypes::METRIC_ERROR_RATE, 0.25));
+$emitter->sendMetric(new SecurityMetric(
+    timestamp: new DateTimeImmutable(),
+    metricType: EventTypes::METRIC_ERROR_RATE,
+    value: 0.25,
+    tags: ['endpoint' => '/pay', 'method' => 'GET']
+));
 $info = $emitClient->infos[0] ?? ['template' => null, 'fields' => []];
 $t->same('guard.metric.error_rate', $info['template'], 'metric template is guard.metric.<type>');
 $t->same(0.25, $info['fields']['value'] ?? null, 'metric value field');
 $t->same('/pay', $info['fields']['endpoint'] ?? null, 'metric endpoint field');
+$t->same('GET', $info['fields']['method'] ?? null, 'extra tags join the metric fields');
 $t->truthy(!isset($info['fields']['value']) || $info['fields']['value'] === 0.25, 'the value tag does not overwrite the metric value');
+
+$emitter->initializeRedis(new stdClass());
+$emitter->flushBuffer();
+$t->same(null, $emitter->getDynamicRules(), 'logfire getDynamicRules is null');
+$t->truthy(true, 'logfire redis/flush are no-ops');
 
 // ---------------------------------------------------------------------
 // 4. Default transport shape

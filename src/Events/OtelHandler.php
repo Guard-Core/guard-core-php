@@ -256,20 +256,19 @@ final class OtelHandler
      */
     private function extractParentContext(array $metadata): array
     {
-        $traceparent = $metadata['traceparent'] ?? null;
-        if (!is_string($traceparent) || $traceparent === '') {
-            return [];
-        }
-        $parts = explode('-', trim($traceparent));
-        if (count($parts) < 4) {
-            return [];
-        }
-        [, $traceId, $spanId] = $parts;
-        if (!self::isHexOfLength($traceId, 32) || !self::isHexOfLength($spanId, 16)) {
+        $raw = $metadata['traceparent'] ?? null;
+        $parts = is_string($raw) && $raw !== '' ? explode('-', trim($raw)) : [];
+        if (count($parts) < 4
+            || !self::isHexOfLength((string) $parts[1], 32)
+            || !self::isHexOfLength((string) $parts[2], 16)
+        ) {
+            // Every invalid shape funnels here: non-string or empty
+            // traceparent, fewer than four segments, malformed ids - the
+            // reference's swallowed extraction failure.
             return [];
         }
 
-        return ['traceId' => strtolower($traceId), 'spanId' => strtolower($spanId)];
+        return ['traceId' => strtolower((string) $parts[1]), 'spanId' => strtolower((string) $parts[2])];
     }
 
     private static function isHexOfLength(string $value, int $length): bool

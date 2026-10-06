@@ -173,6 +173,17 @@ $t->same('json', (new SecurityConfig(logFormat: 'json'))->logFormat, 'json accep
 $flipped = (new SecurityConfig(logFormat: 'json'))->with(['log_format' => 'text']);
 $t->same('text', $flipped->logFormat, 'with() can flip the format');
 
+// Parent-process coverage for the branches the stderr-capturing child
+// cannot carry: the text layout and the debug gate (console suppressed),
+// plus a live engine-closure call (one line lands on the suite's stderr).
+$silent = LogSetup::setupCustomLogging(null, 'text', hostOwnsLogging: true);
+$silent->log('warning', 'text layout branch', []);
+$silent->log('debug', 'dropped in the parent too', []);
+$t->truthy(true, 'the text layout + debug gate run clean with console suppressed');
+$engineClosure = LogSetup::engineLogClosure(new SecurityConfig(logFormat: 'json'));
+$engineClosure('warning', 'via the engine closure', []);
+$t->truthy(true, 'the engine closure emits without error');
+
 $threw = false;
 try {
     new SecurityConfig(logFormat: 'yaml');
