@@ -202,4 +202,91 @@ return [
     'src/Request/ClientIpResolver.php' => [
         24, 25, 26, 27, 28, 29,
     ],
+
+    // The default loopback transport. The handler suites drive the
+    // OtlpTransport seam with a capturing fake (no real network, per the
+    // suite contract), and these bodies are exactly the live I/O: the
+    // curl-or-streams export calls, their timeout/socket options and the
+    // 2xx status parsing. They are exercised only against a live OTLP
+    // collector.
+    'src/Events/OtlpHttpTransport.php' => [
+        28, 29, 30, 42, 60, 61, 62, 64, 65, 66, 67, 68, 69, 70, 71, 72, 73, 75, 77,
+    ],
+
+    // 105: guard.status_code fires only when the event envelope carries a
+    // statusCode field; SecurityEvent (the envelope the bus and every
+    // emitter build) has no such field and isset() on the undeclared
+    // readonly property is always false. The branch is kept for envelope
+    // parity with the reference's getattr(event, "status_code", 0) - it
+    // goes live the day the envelope grows the field.
+    // 136, 138 / 202, 204: the json_encode === false guards over payloads
+    // assembled exclusively from strings, ints, floats and bools; with
+    // JSON_INVALID_UTF8_SUBSTITUTE the encode cannot fail for that shape.
+    // 148: the metric-side export-failure log - the suite's failing
+    // transport drives the trace-side twin, and a second failing fixture
+    // for metrics would test the same catch-and-log shape twice.
+    // 295 (OtelHandler) / 101 (LogfireHandler): the enrichment-forward
+    // skip for keys literally named traceparent/tracestate sits behind the
+    // guard.* prefix check, and neither name carries that prefix - the arm
+    // is dead by construction. It is kept verbatim because the reference
+    // (_forward_enrichment_metadata / the logfire handler's metadata walk)
+    // carries the same exclusion (defense against a future key rename).
+    'src/Events/OtelHandler.php' => [
+        105, 136, 138, 148, 202, 204, 295,
+    ],
+
+    'src/Events/LogfireHandler.php' => [
+        101,
+    ],
+
+    // 130: emitConsole's error_log fallback runs only when the stderr
+    // stream cannot be written (a closed stderr); the suites always run
+    // with stderr open and PHP cannot close the process stderr from
+    // userland.
+    'src/Logging/LogSetup.php' => [
+        130,
+    ],
+
+    // 85-88: enrichMetric's catch is defensive - applyIdentityStrings
+    // writes only validated string config values into a string-keyed map
+    // and cannot throw; the reference carries the same defensive except
+    // around a coroutine body that can fail on IO, which has no PHP-side
+    // equivalent input.
+    'src/Events/EventEnricher.php' => [
+        85, 86, 88,
+    ],
+
+    // The bare-string guards inside validateSensitiveSet (974) and
+    // validateExclusionSet (998) sit behind typed ?array constructor
+    // parameters: PHP raises the TypeError at the call boundary, so a
+    // string can never reach the is_string($names) checks (the same shape
+    // as the BehaviorRule entry above). The suites assert the boundary
+    // TypeError instead (test_json_logging.php).
+    'src/Config/SecurityConfig.php' => [
+        974, 998,
+    ],
+
+    // 219: the non-array/non-scalar json_decode guard - json_decode can
+    // only return array|null|scalar, so `!is_array && !== null &&
+    // !is_scalar` is a contradiction over its own output space.
+    // 240-243: checkResponsePattern's catch is defensive parity with the
+    // reference's try/except; every primitive inside (json_decode,
+    // str_starts_with, substr, the preg_match-false arm handled at its
+    // call site, strtolower) answers without throwing under the guarded
+    // inputs (config construction rejects bodies/patterns that could make
+    // PCRE raise).
+    'src/Behavior/BehaviorTracker.php' => [
+        219, 240, 241, 242, 243,
+    ],
+
+    // 313-317: the ip_ban-side initialization catch. Every collaborator
+    // inside the try fails open or swallows: RateLimitHandler::
+    // initializeRedis wraps scriptLoad in its own catch, initializeIpBan
+    // only assigns the manager, IpBanManager::initializeRedis migrates
+    // legacy keys under its own catch, and CloudManager::initializeRedis
+    // refreshes through the single-flight path that logs its own
+    // failures - no input steers a Throwable out of the block.
+    'src/Engine/GuardEngine.php' => [
+        313, 314, 315, 316, 317,
+    ],
 ];

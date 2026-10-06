@@ -123,6 +123,32 @@ final class BehaviorTracker
     }
 
     /**
+     * Mirrors get_recent_event_count (behavior_handler.py): the total
+     * in-window usage hits recorded for one client across every endpoint
+     * bucket (local stores only - the redis-backed windows are not walked,
+     * matching the reference which only reads its local map). Used by the
+     * event enrichment's behavior correlation. $now defaults to
+     * microtime(true) like the reference's time.time().
+     */
+    public function getRecentEventCount(string $ip, int $windowSeconds, ?float $now = null): int
+    {
+        if ($ip === '') {
+            return 0;
+        }
+        $cutoff = ($now ?? microtime(true)) - $windowSeconds;
+        $count = 0;
+        foreach ($this->usageCounts as $endpointBucket) {
+            foreach ($endpointBucket[$ip] ?? [] as $ts) {
+                if ($ts >= $cutoff) {
+                    $count++;
+                }
+            }
+        }
+
+        return $count;
+    }
+
+    /**
      * Prunes and appends one timestamp in the bounded local store and
      * returns the new in-window count. Python evicts LRU-first via
      * _lru_pop_or_create; the PHP array keeps insertion order, so the

@@ -143,6 +143,33 @@ final class SecurityConfig
     /** Whether agent-synced dynamic rules are active (enable_dynamic_rules). */
     public readonly bool $dynamicRulesEnabled;
 
+    /** The guard.* enrichment gate (enable_enrichment, default false). */
+    public readonly bool $enableEnrichment;
+
+    /** Project id stamped as guard.project_id on events and metrics. */
+    public readonly ?string $agentProjectId;
+
+    /** Service name stamped as guard.service.name (default "guard-core"). */
+    public readonly string $otelServiceName;
+
+    /** OTLP/HTTP base endpoint for the OTEL exporter; null disables export endpoints. */
+    public readonly ?string $otelExporterEndpoint;
+
+    /** @var array<string, string> extra OTEL resource attributes (e.g. deployment.environment). */
+    public readonly array $otelResourceAttributes;
+
+    /** Whether the OTEL export handler joins the composite (enable_otel, default false). */
+    public readonly bool $enableOtel;
+
+    /** Whether the Logfire handler joins the composite (enable_logfire, default false). */
+    public readonly bool $enableLogfire;
+
+    /** Service name for the Logfire integration (default "guard-core"). */
+    public readonly string $logfireServiceName;
+
+    /** Log record layout for the setup logger: "text" or "json" (log_format). */
+    public readonly string $logFormat;
+
     /** Optional atomic file copy of the dynamic rules last-known snapshot. */
     public readonly ?string $dynamicRulesCachePath;
 
@@ -250,6 +277,15 @@ final class SecurityConfig
      * @param list<string> $blockedCountries unsupported when non-empty
      * @param list<string> $whitelistCountries unsupported when non-empty
      * @param list<string> $blockCloudProviders selectors "Provider" or "Provider:!region", unknown provider names rejected
+     * @param bool|null $enableEnrichment the guard.* metadata stamping gate (enable_enrichment)
+     * @param string|null $agentProjectId project id stamped as guard.project_id
+     * @param string|null $otelServiceName service name stamped as guard.service.name
+     * @param string|null $otelExporterEndpoint OTLP/HTTP base endpoint for the OTEL exporter
+     * @param array<string, string>|null $otelResourceAttributes extra OTEL resource attributes (values must be strings)
+     * @param bool|null $enableOtel whether the OTEL export handler joins the composite
+     * @param bool|null $enableLogfire whether the Logfire handler joins the composite
+     * @param string|null $logfireServiceName service name for the Logfire integration
+     * @param string|null $logFormat log record layout, "text" or "json"
      */
     public function __construct(
         ?bool $enableRedis = null,
@@ -318,7 +354,16 @@ final class SecurityConfig
         ?\Closure $customRequestCheck = null,
         ?\Closure $authVerifier = null,
         ?string $logSuspiciousLevel = null,
-        ?string $logRequestLevel = null
+        ?string $logRequestLevel = null,
+        ?bool $enableEnrichment = null,
+        ?string $agentProjectId = null,
+        ?string $otelServiceName = null,
+        ?string $otelExporterEndpoint = null,
+        ?array $otelResourceAttributes = null,
+        ?bool $enableOtel = null,
+        ?bool $enableLogfire = null,
+        ?string $logfireServiceName = null,
+        ?string $logFormat = null
     ) {
         $this->enableRedis = $enableRedis ?? true;
         $this->redisUrl = $redisUrl;
@@ -503,6 +548,29 @@ final class SecurityConfig
         $this->agentEnableMetrics = $agentEnableMetrics ?? true;
         $this->dynamicRulesEnabled = $enableDynamicRules ?? false;
         $this->dynamicRulesCachePath = $dynamicRulesCachePath;
+        // The enrichment + observability surface (the reference
+        // enable_enrichment / enable_otel / enable_logfire family): the
+        // guard.* metadata stamping gate and the two extra composite sinks.
+        $this->enableEnrichment = $enableEnrichment ?? false;
+        $this->agentProjectId = $agentProjectId;
+        $this->otelServiceName = $otelServiceName ?? 'guard-core';
+        $this->otelExporterEndpoint = $otelExporterEndpoint;
+        $resolvedResourceAttributes = [];
+        foreach ($otelResourceAttributes ?? [] as $key => $value) {
+            if (!is_string($value)) {
+                throw new \InvalidArgumentException('otel_resource_attributes: values must be strings');
+            }
+            $resolvedResourceAttributes[(string) $key] = $value;
+        }
+        $this->otelResourceAttributes = $resolvedResourceAttributes;
+        $this->enableOtel = $enableOtel ?? false;
+        $this->enableLogfire = $enableLogfire ?? false;
+        $this->logfireServiceName = $logfireServiceName ?? 'guard-core';
+        $resolvedLogFormat = $logFormat ?? 'text';
+        if ($resolvedLogFormat !== 'text' && $resolvedLogFormat !== 'json') {
+            throw new \InvalidArgumentException("log_format: unknown format '{$resolvedLogFormat}'");
+        }
+        $this->logFormat = $resolvedLogFormat;
         $this->customRequestCheck = $customRequestCheck;
     }
 
@@ -710,6 +778,15 @@ final class SecurityConfig
             'logSuspiciousLevel' => $this->logSuspiciousLevel,
             'logRequestLevel' => $this->logRequestLevel,
             'customRequestCheck' => $this->customRequestCheck,
+            'enableEnrichment' => $this->enableEnrichment,
+            'agentProjectId' => $this->agentProjectId,
+            'otelServiceName' => $this->otelServiceName,
+            'otelExporterEndpoint' => $this->otelExporterEndpoint,
+            'otelResourceAttributes' => $this->otelResourceAttributes,
+            'enableOtel' => $this->enableOtel,
+            'enableLogfire' => $this->enableLogfire,
+            'logfireServiceName' => $this->logfireServiceName,
+            'logFormat' => $this->logFormat,
         ];
     }
 
