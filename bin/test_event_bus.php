@@ -670,7 +670,10 @@ $emergencyEngine = new GuardEngine(new SecurityConfig(enableRedis: false, emerge
 $emergencyEngine->eventBus()->setAgentHandler($emergencyAgent);
 $allowedEmergencyRequest = new SimpleGuardRequest(method: 'GET', urlPath: '/status', headers: [], clientHost: '10.0.0.1');
 $t->same(null, $emergencyEngine->execute($allowedEmergencyRequest), 'a whitelisted ip passes emergency mode');
-$t->same([], $emergencyAgent->received, 'the whitelisted pass emitted nothing');
+// The pass now carries exactly the security_headers_applied tick (the
+// reference headers manager emits for the response the adapter sends).
+$emergencyTypes = array_map(static fn (object $e): string => $e->eventType, $emergencyAgent->received);
+$t->same([EventTypes::EVENT_SECURITY_HEADERS_APPLIED], $emergencyTypes, 'the whitelisted pass emits only the headers tick');
 $emergencyRequest = new SimpleGuardRequest(method: 'GET', urlPath: '/status', headers: [], clientHost: '203.0.113.22');
 $t->same(503, $emergencyEngine->execute($emergencyRequest)?->statusCode(), 'emergency mode blocks non-whitelisted ips');
 $emergencyTypes = array_map(static fn (object $e): string => $e->eventType, $emergencyAgent->received);

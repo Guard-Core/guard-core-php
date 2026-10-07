@@ -15,6 +15,7 @@ use RenzoFranceschini\GuardCore\Detection\PerformanceMonitor;
 use RenzoFranceschini\GuardCore\Detection\SusPatterns;
 use RenzoFranceschini\GuardCore\Detection\Redos\ValidationCache;
 use RenzoFranceschini\GuardCore\Events\EventBus;
+use RenzoFranceschini\GuardCore\Events\EventTypes;
 use RenzoFranceschini\GuardCore\Logging\LogRedactor;
 use RenzoFranceschini\GuardCore\Pipeline\BlockEvents;
 use RenzoFranceschini\GuardCore\Pipeline\CheckFactory;
@@ -32,6 +33,12 @@ use RenzoFranceschini\GuardCore\SecurityHeaders\SecurityHeadersPolicy;
 final class GuardEngine
 {
     public const UNRESOLVABLE_CLIENT_CHECK_NAME = 'client_address_unresolved';
+
+    /** The reference security-headers cache TTL (TTLCache ttl=300). */
+    private const HEADERS_CACHE_TTL = 300;
+
+    /** The reference security-headers cache size (TTLCache maxsize=1000). */
+    private const HEADERS_CACHE_MAX = 1000;
 
     private SecurityConfig $config;
 
@@ -51,6 +58,15 @@ final class GuardEngine
 
     /** @var array<string, array{enabled?: bool, ok: bool, error: ?string}> */
     private array $initializationStatus = [];
+
+    /**
+     * The reference security-headers TTL cache (TTLCache(1000, 300)): the
+     * security_headers_applied event fires once per config+path per TTL
+     * window, not per response.
+     *
+     * @var array<string, int> cache key => expiry unix timestamp
+     */
+    private array $headersCache = [];
 
     private readonly ?CorsPolicy $corsPolicy;
 
@@ -132,7 +148,8 @@ final class GuardEngine
             $this->susPatterns,
             $this->cloudManager,
             $config->geoIpHandler,
-            $this->suspiciousCountStore
+            $this->suspiciousCountStore,
+            $this->eventBus
         );
         $this->checkFactory = $checkFactory;
         $this->pipeline = new SecurityCheckPipeline(
@@ -229,7 +246,8 @@ final class GuardEngine
             $this->susPatterns,
             $this->cloudManager,
             $config->geoIpHandler,
-            $this->suspiciousCountStore
+            $this->suspiciousCountStore,
+            $this->eventBus
         );
     }
 
@@ -321,16 +339,82 @@ final class GuardEngine
      *
      * @return array<string, string>
      */
+    /**
+     * Computes the security-header set (the adapter seam for pass-through
+     * responses; the engine applies the same set to blocked responses).
+     *
+     * @return array<string, string>
+     */
     public function responseHeaders(): array
     {
         return $this->config->securityHeaders->responseHeaders();
     }
 
-    private function applySecurityHeaders(GuardResponse $response): void
+    private function applySecurityHeaders(GuardResponse $response, ?GuardRequest $request = null): void
     {
         foreach ($this->responseHeaders() as $name => $value) {
             $response->headers()->set($name, $value);
         }
+        if ($request !== null) {
+            $this->recordHeadersApplied($request, $this->responseHeaders());
+        }
+    }
+
+    /**
+     * The reference _send_headers_applied_event behind the security-headers
+     * TTL cache (TTLCache(1000, 300), keyed cfg_{config id}_path_{sha256
+     * prefix}): one event per config+path per TTL window, and never for an
+     * empty path (the reference gates on request_path).
+     *
+     * @param array<string, string> $headers
+     */
+    private function recordHeadersApplied(GuardRequest $request, array $headers): void
+    {
+        $path = $request->urlPath();
+        $now = time();
+        $key = $path === '' ? null : self::headersCacheKey($this->config, $path);
+        $fresh = $key === null || ($this->headersCache[$key] ?? 0) > $now;
+        if ($fresh) {
+            return;
+        }
+        $this->headersCache[$key] = $now + self::HEADERS_CACHE_TTL;
+        // Over capacity: trim oldest-first, the TTLCache eviction order for
+        // a single shared TTL (the entry nearest expiry is the oldest
+        // insertion), so the bound and the per-path emission window hold.
+        while (count($this->headersCache) > self::HEADERS_CACHE_MAX) {
+            array_shift($this->headersCache);
+        }
+        $this->eventBus->sendHandlerEvent(
+            EventTypes::EVENT_SECURITY_HEADERS_APPLIED,
+            'security_headers',
+            '',
+            'headers_added',
+            'Security headers applied to response',
+            [
+                'path' => LogRedactor::redactUrlForDisplay(
+                    $path,
+                    $this->config->logSensitiveParams,
+                    $this->config->logSensitiveBodyFields,
+                    $this->config->logSensitiveHeaders
+                ),
+                'headers_count' => count($headers),
+                'has_csp' => isset($headers['Content-Security-Policy']),
+                'has_hsts' => isset($headers['Strict-Transport-Security']),
+            ]
+        );
+    }
+
+    /**
+     * The reference _generate_cache_key: cfg_{config id}_path_{sha256 of the
+     * lowercased, slash-stripped path, first 16 hex} - or the default key
+     * for an empty path.
+     */
+    private static function headersCacheKey(SecurityConfig $config, string $path): string
+    {
+        $normalized = strtolower($path);
+        $base = 'path_' . substr(hash('sha256', trim($normalized, '/')), 0, 16);
+
+        return 'cfg_' . spl_object_id($config) . '_' . $base;
     }
 
     public function initialize(): void
@@ -415,7 +499,7 @@ final class GuardEngine
             $state->clientIp = $clientIp;
             if ($clientIp === ClientIpResolver::UNKNOWN_CLIENT_IDENTITY && $this->config->failSecure) {
                 $response = $this->unresolvableClientResponse($request);
-                $this->applySecurityHeaders($response);
+                $this->applySecurityHeaders($response, $request);
                 $cors?->injectResponseHeaders($response, $request->headers());
 
                 return $response;
@@ -434,17 +518,25 @@ final class GuardEngine
                 $state->routeConfig,
                 microtime(true)
             );
+            // The adapter deterministically applies this pure header set to
+            // the pass-through response (the responseHeaders() seam), so
+            // the security_headers_applied emission fires here, on the
+            // reference's per-config+path TTL-cache schedule.
+            $headers = $this->responseHeaders();
+            if ($headers !== []) {
+                $this->recordHeadersApplied($request, $headers);
+            }
         }
 
         if ($cors === null) {
             if ($response !== null) {
-                $this->applySecurityHeaders($response);
+                $this->applySecurityHeaders($response, $request);
             }
 
             return $response;
         }
         if ($response !== null) {
-            $this->applySecurityHeaders($response);
+            $this->applySecurityHeaders($response, $request);
             $cors->injectResponseHeaders($response, $request->headers());
 
             return $response;
@@ -452,7 +544,7 @@ final class GuardEngine
 
         $preflightResponse = $preflight ? $cors->buildPreflightResponse($request, $this->responseFactory) : null;
         if ($preflightResponse !== null) {
-            $this->applySecurityHeaders($preflightResponse);
+            $this->applySecurityHeaders($preflightResponse, $request);
         }
 
         return $preflightResponse;

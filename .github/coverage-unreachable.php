@@ -271,7 +271,7 @@ return [
         219, 240, 241, 242, 243,
     ],
 
-    // 373-377: the ip_ban-side initialization catch. Every collaborator
+    // 457-461: the ip_ban-side initialization catch. Every collaborator
     // inside the try fails open or swallows: RateLimitHandler::
     // initializeRedis wraps scriptLoad in its own catch, initializeIpBan
     // only assigns the manager, IpBanManager::initializeRedis migrates
@@ -279,6 +279,6 @@ return [
     // refreshes through the single-flight path that logs its own
     // failures - no input steers a Throwable out of the block.
     'src/Engine/GuardEngine.php' => [
-        373, 374, 375, 376, 377,
+        457, 458, 459, 460, 461,
     ],
 ];

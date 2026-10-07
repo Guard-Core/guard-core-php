@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace RenzoFranceschini\GuardCore\Events;
 
+use RenzoFranceschini\GuardCore\Cloud\CloudManager;
 use RenzoFranceschini\GuardCore\Config\SecurityConfig;
 use RenzoFranceschini\GuardCore\Logging\LogRedactor;
 use RenzoFranceschini\GuardCore\Routing\RouteConfig;
@@ -173,6 +174,53 @@ final class EventBus
                 'redirect_url' => $httpsUrl,
             ]
         );
+    }
+
+    /**
+     * The reference send_cloud_detection_events (middleware_events.py): the
+     * cloud-handler verdict event (cloud_blocked with the provider and
+     * network, handler "cloud", action request_blocked or logged_only in
+     * passive mode) plus, when the caller forwards a route that blocks
+     * clouds itself, the route's decorator_violation (decorator_type
+     * access_control, violation_type cloud_provider). The engine's check
+     * passes a null route for its own route-level block and emits the
+     * block_clouds decorator event itself, exactly like the reference.
+     *
+     * @param list<string> $providers
+     */
+    public function sendCloudDetectionEvents(
+        object $request,
+        string $clientIp,
+        array $providers,
+        ?RouteConfig $routeConfig,
+        CloudManager $cloudHandler,
+        bool $passiveMode
+    ): void {
+        $details = $cloudHandler->getCloudProviderDetails($clientIp, $providers);
+        if ($details !== null) {
+            [$provider, $network] = $details;
+            $this->sendHandlerEvent(
+                EventTypes::EVENT_CLOUD_BLOCKED,
+                'cloud',
+                $clientIp,
+                $passiveMode ? 'logged_only' : 'request_blocked',
+                "IP belongs to blocked cloud provider: {$provider}",
+                ['cloud_provider' => $provider, 'network' => $network]
+            );
+        }
+        if ($routeConfig !== null && $routeConfig->blockCloudProviders !== []) {
+            $this->sendMiddlewareEvent(
+                EventTypes::EVENT_DECORATOR_VIOLATION,
+                $request,
+                $passiveMode ? 'logged_only' : 'request_blocked',
+                "Cloud provider IP {$clientIp} blocked",
+                [
+                    'decorator_type' => 'access_control',
+                    'violation_type' => 'cloud_provider',
+                    'blocked_providers' => array_values($providers),
+                ]
+            );
+        }
     }
 
     /**
