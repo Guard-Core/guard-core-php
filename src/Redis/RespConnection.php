@@ -13,16 +13,40 @@ class RespConnection
     private float $connectTimeout;
     private float $timeout;
 
+    /**
+     * Seconds a socket may sit idle before the next command PING-probes it
+     * and recycles it on failure (redis_health_check_interval, default 30,
+     * 0 disables); the reference's pooled-connection health check, which
+     * keeps the first request after an idle period from failing on a
+     * stale socket.
+     */
+    private int $healthCheckInterval;
+
+    /**
+     * The pool cap (redis_max_connections): the client is a
+     * single-active-connection design under PHP's request-scoped runtime,
+     * so the cap is enforced on the recycle path - a stale socket is
+     * closed before any replacement opens, and the client never holds
+     * more open sockets than the cap.
+     */
+    private ?int $maxConnections;
+
+    protected float $lastActivityNs = 0.0;
+
     public function __construct(
         string $host = '127.0.0.1',
         int $port = 6379,
         float $connectTimeout = 2.0,
-        float $timeout = 2.0
+        float $timeout = 2.0,
+        ?int $healthCheckInterval = 30,
+        ?int $maxConnections = null
     ) {
         $this->host = $host;
         $this->port = $port;
         $this->connectTimeout = $connectTimeout;
         $this->timeout = $timeout;
+        $this->healthCheckInterval = $healthCheckInterval ?? 30;
+        $this->maxConnections = $maxConnections;
     }
 
     public function close(): void
@@ -31,6 +55,16 @@ class RespConnection
             fclose($this->stream);
         }
         $this->stream = null;
+    }
+
+    public function healthCheckInterval(): int
+    {
+        return $this->healthCheckInterval;
+    }
+
+    public function maxConnections(): ?int
+    {
+        return $this->maxConnections;
     }
 
     public function command(string ...$args): mixed
@@ -178,16 +212,49 @@ class RespConnection
             $this->connectTimeout
         );
         if ($stream === false) {
-            throw new GuardRedisException("Redis connection failed: {$errstr}");
+            throw new GuardRedisException("Redis connection failed: {$errstr}", 503, null, transient: true);
         }
         if ($this->timeout > 0) {
             stream_set_timeout($stream, (int) $this->timeout, (int) (($this->timeout - (int) $this->timeout) * 1e6));
         }
         $this->stream = $stream;
+        // A fresh socket is never probed: the idle clock starts at connect.
+        $this->lastActivityNs = (float) hrtime(true);
+    }
+
+    /**
+     * The redis_health_check_interval probe: a socket idle longer than the
+     * interval is PING'd before the real command rides it, and a failed
+     * probe closes it (the max-connections cap frees the slot before the
+     * command's lazy reconnect opens a replacement). A probe failure is
+     * not an error: the following command reconnects transparently.
+     */
+    protected function healthCheck(): void
+    {
+        if ($this->healthCheckInterval <= 0 || !is_resource($this->stream)) {
+            return;
+        }
+        $idleSeconds = (hrtime(true) - $this->lastActivityNs) / 1e9;
+        if ($idleSeconds < $this->healthCheckInterval) {
+            return;
+        }
+        try {
+            $this->writePayload([['PING']]);
+            $this->readReplies(1);
+        } catch (\Throwable) {
+            $this->close();
+        }
     }
 
     /** @param list<list<string>> $commands */
     public function writeCommands(array $commands): void
+    {
+        $this->healthCheck();
+        $this->writePayload($commands);
+    }
+
+    /** @param list<list<string>> $commands */
+    protected function writePayload(array $commands): void
     {
         if (!is_resource($this->stream)) {
             $this->connect();
@@ -208,10 +275,11 @@ class RespConnection
                 $meta = is_resource($this->stream) ? stream_get_meta_data($this->stream) : [];
                 $this->close();
                 $reason = ($meta['timed_out'] ?? false) ? 'socket timeout' : 'broken pipe';
-                throw new GuardRedisException("Redis write failed: {$reason}");
+                throw new GuardRedisException("Redis write failed: {$reason}", 503, null, transient: true);
             }
             $written += $n;
         }
+        $this->lastActivityNs = (float) hrtime(true);
     }
 
     /** @return list<mixed> */
@@ -230,7 +298,7 @@ class RespConnection
         $line = $this->readLine();
         if ($line === false || $line === '') {
             $this->close();
-            throw new GuardRedisException('Redis read failed: empty reply (timeout or closed socket)');
+            throw new GuardRedisException('Redis read failed: empty reply (timeout or closed socket)', 503, null, transient: true);
         }
         $type = $line[0];
         $body = substr($line, 1, -2);
@@ -259,7 +327,7 @@ class RespConnection
                 return $items;
             default:
                 $this->close();
-                throw new GuardRedisException("Redis protocol error: unknown reply type '{$type}'");
+                throw new GuardRedisException("Redis protocol error: unknown reply type '{$type}'", 503, null, transient: true);
         }
     }
 
@@ -269,7 +337,7 @@ class RespConnection
         if ($line === false) {
             $meta = stream_get_meta_data($this->stream);
             if ($meta['timed_out'] ?? false) {
-                throw new GuardRedisException('Redis read failed: socket timeout');
+                throw new GuardRedisException('Redis read failed: socket timeout', 503, null, transient: true);
             }
         }
 
@@ -286,7 +354,7 @@ class RespConnection
                 $meta = stream_get_meta_data($this->stream);
                 $this->close();
                 $reason = ($meta['timed_out'] ?? false) ? 'socket timeout' : 'stream closed';
-                throw new GuardRedisException("Redis read failed: {$reason}");
+                throw new GuardRedisException("Redis read failed: {$reason}", 503, null, transient: true);
             }
             $data .= $chunk;
             $remaining -= strlen($chunk);

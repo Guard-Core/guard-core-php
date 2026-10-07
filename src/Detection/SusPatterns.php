@@ -7,6 +7,10 @@ namespace RenzoFranceschini\GuardCore\Detection;
 use RenzoFranceschini\GuardCore\Detection\Redos\Prefilters;
 use RenzoFranceschini\GuardCore\Detection\Redos\ScanGuard;
 use RenzoFranceschini\GuardCore\Detection\Redos\ScanResult;
+use RenzoFranceschini\GuardCore\Detection\Redos\ValidationCache;
+use RenzoFranceschini\GuardCore\Events\EventBus;
+use RenzoFranceschini\GuardCore\Events\EventTypes;
+use RenzoFranceschini\GuardCore\Redis\RedisHandler;
 use RenzoFranceschini\GuardCore\Support\Generated\PatternData;
 use RenzoFranceschini\GuardCore\Support\Text;
 
@@ -68,6 +72,17 @@ final class SusPatterns
     private float $semanticThreshold;
 
     /**
+     * The anomaly score a detect() verdict must reach on the regex-threat
+     * weight sum to flag a threat (the reference state's
+     * threat_score_threshold, config detection_threat_score_threshold,
+     * default 1.0).
+     */
+    private float $threatScoreThreshold;
+
+    /** The optional disk-backed cost-verdict cache for the registry gate. */
+    private ?ValidationCache $validationCache;
+
+    /**
      * The reference wires a PerformanceMonitor into its enhanced detection
      * state and records one metric per pattern scan plus one per detect()
      * call (spec 04 "Performance monitoring"); null keeps the monitor off,
@@ -75,11 +90,49 @@ final class SusPatterns
      */
     private ?PerformanceMonitor $performanceMonitor;
 
-    public function __construct(float $semanticThreshold = 0.7, ?PerformanceMonitor $performanceMonitor = null)
-    {
+    /**
+     * The runtime custom-pattern registry, ported from the reference
+     * _suspatterns_registry.py mixin: runtime additions live in two pools
+     * (patterns added with custom=false extend the default catalog,
+     * custom=true form the persisted custom set) and removals of catalog
+     * rows are tracked as a skip set, so the scan loop keeps walking the
+     * frozen PatternData table while observing the exact reference
+     * membership semantics of get_default/custom/all_patterns.
+     *
+     * @var list<string>
+     */
+    private array $addedDefaultPatterns = [];
+
+    /** @var array<string, true> */
+    private array $removedDefaultPatterns = [];
+
+    /** @var list<string> */
+    private array $customPatterns = [];
+
+    private ?RedisHandler $redisHandler = null;
+
+    private ?EventBus $eventBus = null;
+
+    /** @var (callable(string): string)|null redacts a pattern source for reports */
+    private $patternRedactor = null;
+
+    public function __construct(
+        float $semanticThreshold = 0.7,
+        ?PerformanceMonitor $performanceMonitor = null,
+        ?RedisHandler $redisHandler = null,
+        ?EventBus $eventBus = null,
+        ?callable $patternRedactor = null,
+        float $threatScoreThreshold = 1.0,
+        ?ValidationCache $validationCache = null
+    ) {
         $this->preprocessor = new Preprocessor();
         $this->semanticThreshold = $semanticThreshold;
         $this->performanceMonitor = $performanceMonitor;
+        $this->redisHandler = $redisHandler;
+        $this->eventBus = $eventBus;
+        $this->patternRedactor = $patternRedactor;
+        $this->threatScoreThreshold = $threatScoreThreshold;
+        $this->validationCache = $validationCache;
     }
 
     public static function normalizeContext(?string $context): string
@@ -367,6 +420,9 @@ final class SusPatterns
         $binaryPrefix = BinaryPrefix::build($content);
 
         foreach (PatternData::PATTERNS as $index => [$source, $contexts, $category]) {
+            if (isset($this->removedDefaultPatterns[$source])) {
+                continue;
+            }
             if (self::patternExcludedFromView($source, $viewMode)) {
                 continue;
             }
@@ -403,7 +459,43 @@ final class SusPatterns
             );
         }
 
+        // The runtime registry additions scan after the frozen catalog on
+        // every view with no context filter and the custom category, the
+        // reference's (compiled, _CTX_ALL, "custom") tuple semantics: both
+        // the default-appended and the custom pools run everywhere, with
+        // the same per-pattern scan gates (canary, budgets, timeouts) and
+        // the same per-scan monitor metric as a catalog row.
+        foreach ($this->registryPatternSources() as $source) {
+            $startNs = hrtime(true);
+            [$threat, $timeoutOccurred] = $this->scanPattern($source, 'custom', $content, $validatorContext, $binaryPrefix);
+            $elapsedSeconds = (hrtime(true) - $startNs) / 1e9;
+            if ($timeoutOccurred) {
+                $timeouts[] = $source;
+                self::logPatternTimeout($source);
+                if ($threat === null) {
+                    $threat = self::buildTimeoutThreat($source, 'custom', $elapsedSeconds);
+                }
+            }
+            if ($threat !== null) {
+                $threats[] = $threat;
+                $matchedPatterns[] = $source;
+            }
+            $this->performanceMonitor?->recordMetric(
+                pattern: $source,
+                executionTime: $elapsedSeconds,
+                contentLength: Text::len($content),
+                matched: $threat !== null,
+                timeout: $timeoutOccurred
+            );
+        }
+
         return [$threats, $matchedPatterns, $timeouts];
+    }
+
+    /** @return list<string> the registry additions (default-appended, then custom) */
+    private function registryPatternSources(): array
+    {
+        return array_merge($this->addedDefaultPatterns, $this->customPatterns);
     }
 
     /**
@@ -636,7 +728,10 @@ final class SusPatterns
         foreach ($regexThreats as $t) {
             $anomaly += $t['weight'] ?? 1.0;
         }
-        $isThreat = $anomaly >= 1.0 || count($semanticThreats) > 0;
+        // The reference verdict gate: the regex-threat anomaly against the
+        // configured detection_threat_score_threshold, or any semantic
+        // threat flags on its own.
+        $isThreat = $anomaly >= $this->threatScoreThreshold || count($semanticThreats) > 0;
 
         $semanticMax = 0.0;
         foreach ($semanticThreats as $t) {
@@ -673,5 +768,260 @@ final class SusPatterns
         $kb = [$categoryB, $b['pattern'] ?? '', $b['position'] ?? 0, $b['type'] ?? ''];
 
         return $ka <=> $kb;
+    }
+
+    // ------------------------------------------------------------------------
+    // The runtime custom-pattern registry (the reference
+    // _suspatterns_registry.py mixin surface): add/remove/query pattern
+    // families with the ReDoS safety gate, Redis persistence for the custom
+    // pool, the monitor stats cleanup on removal, and the pattern_added /
+    // pattern_removed agent events.
+    // ------------------------------------------------------------------------
+
+    public const PATTERNS_REDIS_NAMESPACE = 'patterns';
+
+    public const PATTERNS_REDIS_KEY = 'custom';
+
+    /**
+     * add_pattern: the pattern must pass the ReDoS safety validator before
+     * it joins a pool; a custom pattern persists to Redis
+     * ("patterns:custom", comma-joined, the reference's exact wire shape)
+     * after the in-memory add, a persistence failure throwing through like
+     * the reference's unguarded set_key. Emits pattern_added.
+     */
+    public function addPattern(string $pattern, bool $custom = false): bool
+    {
+        [$safe, $reason] = Prefilters::validatePatternSafety($pattern, validationCache: $this->validationCache);
+        if (!$safe) {
+            error_log('[guard_core] Rejected unsafe pattern (' . $reason . '): '
+                . substr(self::redactPatternSource($pattern), 0, 50) . '...');
+
+            return false;
+        }
+
+        if ($custom) {
+            if (!in_array($pattern, $this->customPatterns, true)) {
+                $this->customPatterns[] = $pattern;
+            }
+            if ($this->redisHandler !== null) {
+                $this->redisHandler->setKey(
+                    self::PATTERNS_REDIS_NAMESPACE,
+                    self::PATTERNS_REDIS_KEY,
+                    implode(',', $this->customPatterns)
+                );
+            }
+        } else {
+            $this->addedDefaultPatterns[] = $pattern;
+        }
+
+        $this->sendPatternEvent(
+            EventTypes::EVENT_PATTERN_ADDED,
+            'pattern_added',
+            ($custom ? 'Custom' : 'Default') . ' pattern added to detection system',
+            $pattern,
+            $custom ? 'custom' : 'default',
+            count($custom ? $this->customPatterns : $this->addedDefaultPatterns)
+        );
+
+        return true;
+    }
+
+    /**
+     * remove_pattern: removal from either pool (a catalog row removal is
+     * tracked as a scan-time skip), monitor stats for the pattern are
+     * dropped, and pattern_removed is emitted - all only when the pattern
+     * was actually present.
+     */
+    public function removePattern(string $pattern, bool $custom = false): bool
+    {
+        if ($custom) {
+            $position = array_search($pattern, $this->customPatterns, true);
+            if ($position === false) {
+                return false;
+            }
+            unset($this->customPatterns[$position]);
+            $this->customPatterns = array_values($this->customPatterns);
+            if ($this->redisHandler !== null) {
+                $this->redisHandler->setKey(
+                    self::PATTERNS_REDIS_NAMESPACE,
+                    self::PATTERNS_REDIS_KEY,
+                    implode(',', $this->customPatterns)
+                );
+            }
+        } else {
+            $addedPosition = array_search($pattern, $this->addedDefaultPatterns, true);
+            if ($addedPosition !== false) {
+                unset($this->addedDefaultPatterns[$addedPosition]);
+                $this->addedDefaultPatterns = array_values($this->addedDefaultPatterns);
+            } elseif ($this->catalogContains($pattern)) {
+                $this->removedDefaultPatterns[$pattern] = true;
+            } else {
+                return false;
+            }
+        }
+
+        $this->performanceMonitor?->removePatternStats($pattern);
+        $this->sendPatternEvent(
+            EventTypes::EVENT_PATTERN_REMOVED,
+            'pattern_removed',
+            ($custom ? 'Custom' : 'Default') . ' pattern removed from detection system',
+            $pattern,
+            $custom ? 'custom' : 'default',
+            count($custom ? $this->customPatterns : $this->defaultPatternSources())
+        );
+
+        return true;
+    }
+
+    /** @return list<string> get_default_patterns: the effective default pool */
+    public function getDefaultPatterns(): array
+    {
+        return $this->defaultPatternSources();
+    }
+
+    /** @return list<string> get_custom_patterns: the effective custom pool */
+    public function getCustomPatterns(): array
+    {
+        return $this->customPatterns;
+    }
+
+    /** @return list<string> get_all_patterns: the default pool then the custom pool */
+    public function getAllPatterns(): array
+    {
+        return array_merge($this->defaultPatternSources(), $this->customPatterns);
+    }
+
+    /**
+     * Restores the persisted custom pool from Redis before the update loop
+     * starts (the reference initialize_redis): unsafe persisted patterns
+     * are skipped with a warning, any store failure skips the whole
+     * restore with a warning, never a raise.
+     */
+    public function initializeRedis(?RedisHandler $redisHandler): void
+    {
+        $this->redisHandler = $redisHandler;
+        if ($redisHandler === null) {
+            return;
+        }
+        try {
+            $cached = $redisHandler->getKey(self::PATTERNS_REDIS_NAMESPACE, self::PATTERNS_REDIS_KEY);
+            if ($cached === null || $cached === '') {
+                return;
+            }
+            foreach (explode(',', $cached) as $pattern) {
+                if (in_array($pattern, $this->customPatterns, true)) {
+                    continue;
+                }
+                if (!$this->addPattern($pattern, custom: true)) {
+                    error_log('[guard_core] Skipped restoring persisted pattern: '
+                        . substr(self::redactPatternSource($pattern), 0, 50) . '...');
+                }
+            }
+        } catch (\Throwable $e) {
+            error_log('[guard_core] Custom pattern restore skipped: ' . $e->getMessage());
+        }
+    }
+
+    /**
+     * detect_pattern_match: the detect() verdict collapsed to
+     * [matched, redacted first matching pattern source] - a regex threat
+     * reports its redacted pattern, a semantic threat reports
+     * "semantic:{attack_type}", any other threat shape reports "unknown".
+     *
+     * @return array{0: bool, 1: string|null}
+     */
+    public function detectPatternMatch(string $content, string $ip, string $context): array
+    {
+        return self::patternMatchFromResult($this->detect($content, $ip, $context));
+    }
+
+    /**
+     * The result-to-match projection, split out so the three threat-shape
+     * branches stay testable without forcing a semantic/timeout detection.
+     *
+     * @param array<string, mixed> $result
+     * @return array{0: bool, 1: string|null}
+     */
+    public static function patternMatchFromResult(array $result): array
+    {
+        if (!($result['is_threat'] ?? false)) {
+            return [false, null];
+        }
+        $threats = $result['threats'] ?? [];
+        if ($threats !== []) {
+            $threat = $threats[0];
+            if (($threat['type'] ?? '') === 'regex') {
+                return [true, self::sanitizeForReporting(is_string($threat['pattern'] ?? null) ? $threat['pattern'] : '')];
+            }
+            if (($threat['type'] ?? '') === 'semantic') {
+                $attackType = is_string($threat['attack_type'] ?? null) ? $threat['attack_type'] : 'suspicious';
+
+                return [true, 'semantic:' . $attackType];
+            }
+        }
+
+        return [true, 'unknown'];
+    }
+
+    private function catalogContains(string $source): bool
+    {
+        foreach (PatternData::PATTERNS as [$catalogSource]) {
+            if ($catalogSource === $source) {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    /** @return list<string> the catalog sources minus removals, additions appended */
+    private function defaultPatternSources(): array
+    {
+        $sources = [];
+        foreach (PatternData::PATTERNS as [$catalogSource]) {
+            if (!isset($this->removedDefaultPatterns[$catalogSource])) {
+                $sources[] = $catalogSource;
+            }
+        }
+
+        return array_merge($sources, $this->addedDefaultPatterns);
+    }
+
+    private function redactPatternSource(string $pattern): string
+    {
+        if ($this->patternRedactor !== null) {
+            return ($this->patternRedactor)($pattern);
+        }
+
+        return self::sanitizeForReporting($pattern);
+    }
+
+    /**
+     * _send_pattern_event: the registry's own event stream with
+     * handler_name "sus_patterns" and the ip "system", routed through the
+     * bus (the PHP queueable idiom of the reference's direct
+     * agent_handler.send_event) with the redacted source, the pool type
+     * and the pool size as metadata.
+     */
+    private function sendPatternEvent(
+        string $eventType,
+        string $actionTaken,
+        string $reason,
+        string $pattern,
+        string $patternType,
+        int $totalPatterns
+    ): void {
+        $this->eventBus?->sendHandlerEvent(
+            $eventType,
+            'sus_patterns',
+            'system',
+            $actionTaken,
+            $reason,
+            [
+                'pattern' => $this->redactPatternSource($pattern),
+                'pattern_type' => $patternType,
+                'total_patterns' => $totalPatterns,
+            ]
+        );
     }
 }

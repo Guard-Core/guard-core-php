@@ -130,7 +130,10 @@ final class Prefilters
      * compiler.py validate_pattern_safety, in the reference's exact gate
      * order: dangerous constructs, compile check, then (with test strings)
      * the structural checks and the interactive probe, or (without) the
-     * cost arbiter. Returns [safe, reason].
+     * cost arbiter. Returns [safe, reason]. The optional validation cache
+     * covers only the empirical cost-verdict outcome (the cheap
+     * deterministic layers always re-run, mirroring the reference's
+     * disk-backed cache wiring).
      *
      * @param list<string>|null $testStrings
      * @return array{0: bool, 1: string}
@@ -139,7 +142,8 @@ final class Prefilters
         string $pattern,
         ?array $testStrings = null,
         ?int $maxContentLength = null,
-        bool $ignoreCase = true
+        bool $ignoreCase = true,
+        ?ValidationCache $validationCache = null
     ): array {
         $dangerousViolation = self::dangerousConstructViolation($pattern);
         if ($dangerousViolation !== null) {
@@ -158,7 +162,16 @@ final class Prefilters
             return CostArbiter::probeWithTestStrings($pattern, $testStrings, $ignoreCase);
         }
 
-        return CostArbiter::costVerdict($pattern, $maxContentLength, $ignoreCase);
+        if ($validationCache !== null) {
+            $cached = $validationCache->get($pattern, $ignoreCase);
+            if ($cached !== null) {
+                return [$cached['safe'], $cached['reason']];
+            }
+        }
+        $verdict = CostArbiter::costVerdict($pattern, $maxContentLength, $ignoreCase);
+        $validationCache?->put($pattern, $ignoreCase, $verdict[0], $verdict[1]);
+
+        return $verdict;
     }
 
     /** Raw PCRE search over a pattern's source text (no flags, no UCP). */

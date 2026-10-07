@@ -6,6 +6,8 @@ namespace RenzoFranceschini\GuardCore\Rules;
 
 use RenzoFranceschini\GuardCore\Config\SecurityConfig;
 use RenzoFranceschini\GuardCore\Detection\Redos\Prefilters;
+use RenzoFranceschini\GuardCore\Detection\Redos\ValidationCache;
+use RenzoFranceschini\GuardCore\Detection\SusPatterns;
 use RenzoFranceschini\GuardCore\Events\EventBus;
 use RenzoFranceschini\GuardCore\Events\EventTypes;
 use RenzoFranceschini\GuardCore\Redis\RedisHandler;
@@ -57,6 +59,10 @@ final class DynamicRuleManager
      * @param (\Closure(SecurityConfig): void)|null $applyConfig installs a
      *        validated config (the engine swaps it and rebuilds the
      *        pipeline); null records the rules without installing
+     * @param SusPatterns|null $susPatterns the engine's detection engine:
+     *        suspicious_patterns rules register here (the reference's
+     *        _apply_pattern_rules over the singleton); null leaves the
+     *        patterns unapplied with a warning
      * @param (\Closure(): int)|null $clock
      */
     public function __construct(
@@ -66,10 +72,19 @@ final class DynamicRuleManager
         private readonly ?EventBus $eventBus = null,
         private readonly ?\Closure $applyConfig = null,
         private readonly ?\Closure $logger = null,
-        ?\Closure $clock = null
+        ?\Closure $clock = null,
+        private readonly ?SusPatterns $susPatterns = null
     ) {
         $this->clock = $clock ?? static fn (): int => time();
+        // _apply_user_agent_rules builds its validator with the config's
+        // disk-backed validation cache, so re-certifying user-agent
+        // patterns across update passes reuses prior cost verdicts.
+        $this->validationCache = $config->detectionPatternValidationCachePath !== null
+            ? new ValidationCache($config->detectionPatternValidationCachePath)
+            : null;
     }
+
+    private ?ValidationCache $validationCache;
 
     public function currentRules(): ?DynamicRules
     {
@@ -258,8 +273,9 @@ final class DynamicRuleManager
      * The field application (_apply_rules order): ip rules, blocking
      * rules, rate limits, feature toggles, emergency mode. Unknown cloud
      * providers and unvalidatable user-agent patterns are warned and
-     * dropped; suspicious patterns are warned and skipped (the PHP engine
-     * has no runtime custom-pattern registry).
+     * dropped; suspicious patterns register through the engine's runtime
+     * pattern registry (warned and skipped only when no registry is
+     * attached).
      *
      * @return array<string, mixed> the with() values
      */
@@ -291,7 +307,7 @@ final class DynamicRuleManager
         if ($rules->blockedUserAgents !== []) {
             $validated = [];
             foreach ($rules->blockedUserAgents as $pattern) {
-                [$safe, $reason] = Prefilters::validatePatternSafety($pattern);
+                [$safe, $reason] = Prefilters::validatePatternSafety($pattern, validationCache: $this->validationCache);
                 if ($safe) {
                     $validated[] = $pattern;
                 } else {
@@ -347,7 +363,32 @@ final class DynamicRuleManager
                 . ($rules->emergencyWhitelist !== [] ? ': ' . implode(', ', array_slice($rules->emergencyWhitelist, 0, 10)) : ''));
         }
         if ($rules->suspiciousPatterns !== []) {
-            ($this->logger)('warning', 'suspicious_patterns from dynamic rules are skipped: the PHP engine has no runtime custom-pattern registry');
+            // _apply_pattern_rules: every pattern goes through the
+            // detection engine's add_pattern gate (ReDoS-unsafe rows are
+            // rejected there, returning false); the applied list is
+            // reported at info, the rejected at warning. The registrations
+            // are runtime detection state, not config fields - they stay
+            // installed after rule expiry, exactly like the reference
+            // singleton pool.
+            if ($this->susPatterns === null) {
+                ($this->logger)('warning', 'suspicious_patterns from dynamic rules are skipped: no pattern registry is attached to the dynamic rule manager');
+            } else {
+                $added = [];
+                $rejected = [];
+                foreach ($rules->suspiciousPatterns as $pattern) {
+                    if ($this->susPatterns->addPattern($pattern)) {
+                        $added[] = $pattern;
+                    } else {
+                        $rejected[] = $pattern;
+                    }
+                }
+                if ($added !== []) {
+                    ($this->logger)('info', 'Dynamic rule: Added suspicious patterns ' . implode(', ', $added));
+                }
+                if ($rejected !== []) {
+                    ($this->logger)('warning', 'Dynamic rule: rejected patterns ' . implode(', ', $rejected));
+                }
+            }
         }
 
         return $fields;

@@ -119,9 +119,14 @@ final class SuspiciousActivityCheck extends SecurityCheck
             if ($result['is_threat']) {
                 foreach ($result['threats'] as $threat) {
                     $category = $threat['category'] ?? 'custom';
+                    // The reference's category gate lives in
+                    // _pattern_should_be_skipped (_suspatterns_regex.py):
+                    // the custom category (runtime registry rows and the
+                    // decode-budget exhaustion marker) bypasses the
+                    // enabled-categories gate entirely.
                     if (!in_array($category, $categories, true)
                         && !isset($skipCategories[$category])
-                        && isset($enabledCategories[$category])
+                        && ($category === 'custom' || isset($enabledCategories[$category]))
                     ) {
                         $categories[] = $category;
                         $triggerInfo = $prefix . self::threatMessage($threat);

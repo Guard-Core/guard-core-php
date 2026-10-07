@@ -11,7 +11,11 @@ use RenzoFranceschini\GuardCore\Behavior\SuspiciousCountStore;
 use RenzoFranceschini\GuardCore\Cloud\CloudManager;
 use RenzoFranceschini\GuardCore\Config\SecurityConfig;
 use RenzoFranceschini\GuardCore\Cors\CorsPolicy;
+use RenzoFranceschini\GuardCore\Detection\PerformanceMonitor;
+use RenzoFranceschini\GuardCore\Detection\SusPatterns;
+use RenzoFranceschini\GuardCore\Detection\Redos\ValidationCache;
 use RenzoFranceschini\GuardCore\Events\EventBus;
+use RenzoFranceschini\GuardCore\Logging\LogRedactor;
 use RenzoFranceschini\GuardCore\Pipeline\BlockEvents;
 use RenzoFranceschini\GuardCore\Pipeline\CheckFactory;
 use RenzoFranceschini\GuardCore\Pipeline\SecurityCheckPipeline;
@@ -50,6 +54,8 @@ final class GuardEngine
 
     private readonly ?CorsPolicy $corsPolicy;
 
+    private readonly SusPatterns $susPatterns;
+
     private readonly SuspiciousCountStore $suspiciousCountStore;
 
     private readonly ?BehavioralProcessor $behavioralProcessor;
@@ -75,7 +81,10 @@ final class GuardEngine
             enableRedis: $config->enableRedis,
             prefix: $config->redisPrefix,
             host: getenv('REDIS_HOST') ?: '127.0.0.1',
-            port: (int) (getenv('REDIS_PORT') ?: 6379)
+            port: (int) (getenv('REDIS_PORT') ?: 6379),
+            retries: $config->redisRetries,
+            healthCheckInterval: $config->redisHealthCheckInterval,
+            maxConnections: $config->redisMaxConnections
         );
         $this->responseFactory = new GuardResponseFactory();
         $this->eventBus = new EventBus(null, $config, countryResolver: static function (string $ip) use ($config): ?string {
@@ -86,6 +95,33 @@ final class GuardEngine
         $this->cloudManager = $cloudManager ?? ($config->cloudBlockingEnabled() ? new CloudManager() : null);
         $this->corsPolicy = CorsPolicy::forConfig($config);
         $this->suspiciousCountStore = new SuspiciousCountStore();
+        // The engine owns the detection engine instance so the runtime
+        // pattern registry survives config revisions (applyDynamicConfig
+        // rebuilds the pipeline around the same object): the event bus and
+        // the redaction closure are attached here, Redis is attached in
+        // initialize() (the persisted custom pool restores there). The
+        // threat-score threshold and the optional disk-backed validation
+        // cache ride the config.
+        $validationCache = $config->detectionPatternValidationCachePath !== null
+            ? new ValidationCache($config->detectionPatternValidationCachePath)
+            : null;
+        $this->susPatterns = new SusPatterns(
+            $config->detectionSemanticThreshold,
+            new PerformanceMonitor(),
+            eventBus: $this->eventBus,
+            patternRedactor: static function (string $pattern) use ($config): string {
+                return LogRedactor::redactBlob(
+                    $pattern,
+                    LogRedactor::sensitiveNames(
+                        $config->logSensitiveParams,
+                        $config->logSensitiveBodyFields,
+                        $config->logSensitiveHeaders
+                    )
+                );
+            },
+            threatScoreThreshold: $config->detectionThreatScoreThreshold,
+            validationCache: $validationCache
+        );
         $tracker = new BehaviorTracker($config, $this->redis, $this->banManager, $log);
         $this->behavioralProcessor = new BehavioralProcessor($config, $tracker, $this->suspiciousCountStore, $log);
         $checkFactory = new CheckFactory(
@@ -93,7 +129,7 @@ final class GuardEngine
             new RouteResolver(),
             $this->banManager,
             $this->rateLimitHandler,
-            null,
+            $this->susPatterns,
             $this->cloudManager,
             $config->geoIpHandler,
             $this->suspiciousCountStore
@@ -148,10 +184,23 @@ final class GuardEngine
      * e.g. GuardAgent) to the event bus. Events emitted before this call
      * are queued in the bus and drain on attach. Mirrors the reference
      * adapter wiring where the middleware passes the agent handler at
-     * construction.
+     * construction. The agent_strict contract: a handler that does not
+     * expose the sendEvent surface raises InvalidArgumentException at
+     * attach time under agent_strict, and degrades to agent-off with a
+     * warning otherwise.
      */
     public function setAgentHandler(object $agentHandler): void
     {
+        if (!is_callable([$agentHandler, 'sendEvent'])) {
+            if ($this->config->agentStrict) {
+                throw new \InvalidArgumentException(
+                    'agent_strict: the agent handler does not expose the sendEvent surface; refusing to degrade to agent-off'
+                );
+            }
+            error_log('[guard_core] agent handler lacks the sendEvent surface; degrading to agent-off');
+
+            return;
+        }
         $this->eventBus->setAgentHandler($agentHandler);
     }
 
@@ -177,7 +226,7 @@ final class GuardEngine
             new RouteResolver(),
             $this->banManager,
             $this->rateLimitHandler,
-            null,
+            $this->susPatterns,
             $this->cloudManager,
             $config->geoIpHandler,
             $this->suspiciousCountStore
@@ -207,6 +256,16 @@ final class GuardEngine
     public function corsPolicy(): ?CorsPolicy
     {
         return $this->corsPolicy;
+    }
+
+    /**
+     * The engine's detection engine: the runtime pattern registry lives
+     * here (addPattern/removePattern/get*Patterns), shared by every
+     * pipeline rebuild and by the dynamic-rule application.
+     */
+    public function susPatterns(): SusPatterns
+    {
+        return $this->susPatterns;
     }
 
     public function responseFactory(): GuardResponseFactory
@@ -310,6 +369,7 @@ final class GuardEngine
             $this->rateLimitHandler->initializeRedis($this->redis);
             $this->rateLimitHandler->initializeIpBan($this->banManager);
             $this->cloudManager?->initializeRedis($this->redis, ttl: $this->config->cloudIpRefreshInterval);
+            $this->susPatterns->initializeRedis($this->redis);
         } catch (\Throwable $e) {
             $status['ip_ban']['ok'] = false;
             $status['ip_ban']['error'] = $e->getMessage();

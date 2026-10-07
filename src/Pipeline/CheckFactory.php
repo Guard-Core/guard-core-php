@@ -10,6 +10,7 @@ use RenzoFranceschini\GuardCore\Cloud\CloudManager;
 use RenzoFranceschini\GuardCore\Config\SecurityConfig;
 use RenzoFranceschini\GuardCore\Detection\PerformanceMonitor;
 use RenzoFranceschini\GuardCore\Detection\SusPatterns;
+use RenzoFranceschini\GuardCore\Detection\Redos\ValidationCache;
 use RenzoFranceschini\GuardCore\GeoIp\CountryResolver;
 use RenzoFranceschini\GuardCore\Pipeline\Checks\AuthenticationCheck;
 use RenzoFranceschini\GuardCore\Pipeline\Checks\CloudIpRefreshCheck;
@@ -126,7 +127,14 @@ final class CheckFactory
             'suspicious_activity' => new SuspiciousActivityCheck(
                 $config,
                 $this->responseFactory,
-                $this->susPatterns ?? new SusPatterns($config->detectionSemanticThreshold, new PerformanceMonitor()),
+                $this->susPatterns ?? new SusPatterns(
+                    $config->detectionSemanticThreshold,
+                    new PerformanceMonitor(),
+                    threatScoreThreshold: $config->detectionThreatScoreThreshold,
+                    validationCache: $config->detectionPatternValidationCachePath !== null
+                        ? new ValidationCache($config->detectionPatternValidationCachePath)
+                        : null
+                ),
                 $this->ipBanManager,
                 $this->routeResolver,
                 $this->suspiciousCountStore

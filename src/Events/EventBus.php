@@ -98,6 +98,42 @@ final class EventBus
     }
 
     /**
+     * The handler-direct event stream (the reference handlers'
+     * _send_*_event helpers): a system-shaped envelope with an explicit
+     * handler_name and ip_address and no request surface, subject to the
+     * same agent_enable_events gate and the event filter, queued when no
+     * handler is attached like every other bus path.
+     *
+     * @param array<string, mixed> $metadata
+     */
+    public function sendHandlerEvent(
+        string $eventType,
+        string $handlerName,
+        string $ipAddress,
+        string $actionTaken,
+        string $reason,
+        array $metadata = []
+    ): void {
+        if (!$this->config->agentEnableEvents) {
+            return;
+        }
+        if (!$this->eventFilter->isEventAllowed($eventType)) {
+            return;
+        }
+        // dispatch() already isolates send failures (logged, never raised),
+        // so the handler-direct path needs no second guard.
+        $this->dispatch(new SecurityEvent(
+            timestamp: new \DateTimeImmutable('now', new \DateTimeZone('UTC')),
+            eventType: $eventType,
+            ipAddress: $ipAddress,
+            actionTaken: $actionTaken,
+            reason: $reason,
+            handlerName: $handlerName,
+            metadata: $metadata
+        ));
+    }
+
+    /**
      * HTTPS violation dispatch: a route-level require_https emits
      * decorator_violation (decorator_type authentication, violation_type
      * require_https); global enforcement emits https_enforced - both with

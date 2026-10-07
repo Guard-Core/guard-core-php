@@ -9,6 +9,14 @@ class RedisHandler
     private RespConnection $connection;
     private bool $initialized = false;
 
+    /**
+     * Transient-error retries (redis_retries, default 1): the number of
+     * re-attempts after a connect/write/read/timeout failure, each after
+     * a capped backoff pause (the reference Retry(ExponentialBackoff(),
+     * retries) pacing). 0 disables retries.
+     */
+    private int $retries;
+
     public function __construct(
         private bool $enableRedis = true,
         private string $prefix = 'guard_core:',
@@ -16,9 +24,20 @@ class RedisHandler
         private int $port = 6379,
         private float $connectTimeout = 2.0,
         private float $timeout = 2.0,
-        ?RespConnection $connection = null
+        ?RespConnection $connection = null,
+        ?int $retries = null,
+        ?int $healthCheckInterval = 30,
+        ?int $maxConnections = null
     ) {
-        $this->connection = $connection ?? new RespConnection($host, $port, $connectTimeout, $timeout);
+        $this->connection = $connection ?? new RespConnection(
+            $host,
+            $port,
+            $connectTimeout,
+            $timeout,
+            $healthCheckInterval,
+            $maxConnections
+        );
+        $this->retries = $retries ?? 1;
     }
 
     public static function fromEnv(): self
@@ -29,6 +48,17 @@ class RedisHandler
             host: getenv('REDIS_HOST') ?: '127.0.0.1',
             port: (int) (getenv('REDIS_PORT') ?: 6379)
         );
+    }
+
+    /**
+     * The redis_retries backoff pacing before attempt n (1-based, the
+     * first retry being n=1): min(n * 200, 2000) milliseconds, the same
+     * capped exponential-ish shape the sibling ports use for the
+     * reference's ExponentialBackoff.
+     */
+    public static function retryDelayMs(int $attempt): int
+    {
+        return min($attempt * 200, 2000);
     }
 
     public function prefix(): string
@@ -46,7 +76,9 @@ class RedisHandler
         if (!$this->enableRedis) {
             return;
         }
-        $this->connection->ping();
+        $this->safeOperation(function (): void {
+            $this->connection->ping();
+        });
         $this->initialized = true;
     }
 
@@ -186,12 +218,30 @@ class RedisHandler
         }, $namespace, $key, $timestamp, $windowStart, $ttl);
     }
 
+    /**
+     * safe_operation with the redis_retries backoff: a transient failure
+     * (connect/write/read/timeout, never a server-side error reply) is
+     * re-attempted up to $this->retries times after the capped pause; the
+     * failed socket is dropped first so the retry reconnects fresh.
+     *
+     * @param callable $fn
+     */
     private function safeOperation(callable $fn, mixed ...$args): mixed
     {
-        try {
-            return $fn(...$args);
-        } catch (\Throwable $e) {
-            throw new GuardRedisException('Redis operation failed: ' . $e->getMessage(), 503, $e);
+        $attempt = 0;
+        while (true) {
+            try {
+                return $fn(...$args);
+            } catch (GuardRedisException $e) {
+                $attempt++;
+                if (!$e->transient || $attempt > $this->retries) {
+                    throw $e;
+                }
+                $this->connection->close();
+                usleep(self::retryDelayMs($attempt) * 1000);
+            } catch (\Throwable $e) {
+                throw new GuardRedisException('Redis operation failed: ' . $e->getMessage(), 503, $e);
+            }
         }
     }
 }
