@@ -1,5 +1,50 @@
 # Release Notes
 
+v4.3.1 (2026-10-07)
+-------------------
+
+The observability-seam release: guard-core-php 4.3.1 tracks the guard-core 4.3.1 release. The engine gains the event enrichment layer (ThreatScorer + EventEnricher stamping the reference `guard.*` metadata family), the CompositeAgentHandler multi-sink fan-out with the OTel (OTLP/HTTP JSON) and Logfire handlers, JSON structured logging with the `log_format` config switch, the GuardCoreError base exception, the `setAgentHandler` agent seam, and the per-component initialization status surface.
+
+Event enrichment: ThreatScorer + EventEnricher (PR #55)
+-------------------------------------------------------
+
+### Added
+
+- **The deterministic threat-score map (`src/Events/ThreatScorer.php`), same values and order as the reference `_THREAT_SCORE_MAP`: 90 `penetration_attempt`, then the attack-family events down to 10 for the lifecycle events, with default 20 for unmapped types.** The map feeds the `guard.threat_score` enrichment key, so every enriched event carries its severity weight from the same table the reference scores with.
+- **The enrichment layer (`src/Events/EventEnricher.php` + `EnrichmentContext.php`), the four reference steps in reference order, stamped into the event `metadata` under the exact `ENRICHMENT_KEY_*` strings added to `EventTypes.php`: `guard.project_id`, `guard.service.name`, `guard.deployment.environment`, `guard.threat_score`, `guard.rule.id`, `guard.rule.version`, `guard.behavior.correlation_key`, `guard.behavior.recent_event_count`.** Identity (project id when configured, service name always, deployment environment from `otel_resource_attributes["deployment.environment"]`), threat score from the event type, dynamic-rule correlation via the duck-typed `matchEvent` (`[ruleId, version]`), and behavior correlation: `BehaviorTracker.getRecentEventCount(ip, 300)` (mirroring the reference `get_recent_event_count`) plus the `sha256(ip|service|bucket)[:16]` correlation key with `bucket = floor(now/300)`. Failure semantics: any enrichment error logs and the event flows onward; the immutable PHP records make the failure path atomic (the original event is returned), matching the reference's stated intent (its in-place dict mutation can survive a later step's failure despite the "sent unenriched" log line, a divergence recorded in the PR). Enrichment lives in the composite only, as in the reference; the bare agent-handler path is untouched. New config fields with reference defaults: `enableEnrichment=false`, `agentProjectId`, `otelServiceName="guard-core"`, `otelExporterEndpoint`, `otelResourceAttributes={}`, `enableOtel=false`, `enableLogfire=false`, `logfireServiceName="guard-core"`.
+
+Composite, OTel, and Logfire handlers (PR #55)
+----------------------------------------------
+
+### Added
+
+- **`src/Events/CompositeAgentHandler.php`: the multi-sink fan-out port of the reference `composite_handler.py`, with the event/metric filter, one enrichment pass before the fan-out (all sinks observe the same enriched instance), per-sink exception isolation (degraded, not dead), the `started()`/`degraded()`/`failedHandlers()` lifecycle, best-effort `stop()`/`flushBuffer()`/`initializeRedis()`, first-non-null `getDynamicRules()` and all-answering `healthCheck()`.** `src/Events/AgentHandlerComposer.php` mirrors the reference `build_enricher` + `build_composite_handler`: sinks `[agent] + OtelHandler (enable_otel) + LogfireHandler (enable_logfire)`, enricher when `enable_enrichment`.
+- **`src/Events/OtelHandler.php` (+ `OtlpTransport.php`/`OtlpHttpTransport.php`): the `otel_handler.py` port speaking OTLP/HTTP JSON through an injectable transport (production defaults to curl-or-streams with bounded timeouts, tests use a capturing fake).** Faithful surface: the exact `_otlp_signal_endpoint` suffix logic, resource `service.name` plus extra attributes, span `guard.event.<type>` with the `guard.*` attribute family, enrichment forward (the `guard.*` metadata minus traceparent/tracestate), W3C traceparent extraction as the remote parent (malformed falls back to a generated traceId), the metrics mapping (`response_time` -> `guard.request.duration` histogram in seconds, `request_count` -> `guard.request.count`, `error_rate` -> `guard.error.count`, unknown types log and record nothing), and export failures logged never raised. Divergence: the reference's process-global tracer/meter provider claim-and-shutdown dance is inapplicable-idiom in PHP (no global OTel registry; each handler owns its transport, per-instance `start()` stays idempotent).
+- **`src/Events/LogfireHandler.php`: the exact reference lifecycle over an injected duck-typed client (`configured()`/`configure()`/`span()`/`info()`/`shutdown()`):** no client means disabled warning + no-op + unhealthy, an already-configured client means a warning naming the service name that will NOT be applied (configure is not called), and `stop()` shuts down only what guard configured. Emission: span `guard.event.<type>` with event fields plus the enrichment forward, info `guard.metric.<type>` with value/endpoint/safe tags.
+
+JSON structured logging (PR #55)
+--------------------------------
+
+### Added
+
+- **`src/Logging/JsonFormatter.php` (exactly four fields in reference order: `timestamp` in the python asctime shape, `level` uppercase, `logger`, `message`; malformed UTF-8 substitutes instead of failing the encode) and `src/Logging/LogSetup.php` (`setupCustomLogging` returning an engine-compatible `RequestLogger`, the text layout mirroring `[%(name)s] %(asctime)s - %(levelname)s - %(message)s`, the INFO+ gate, on-demand directory creation with console-only fallback, console emission writing bare lines to stderr).** The config switch is `log_format` (`text`|`json`, validated at construction, `with()`-safe) with `LogSetup::engineLogClosure()` for adapters. The reference `body_reader.py` extras (read timeout, concurrency cap, straddle over-read) are documented as inapplicable-idiom for the SAPI model, not ported.
+
+Engine seams: GuardCoreError, agent hook, initialization status (PR #54)
+------------------------------------------------------------------------
+
+### Added
+
+- **`GuardCoreError` base exception: `GuardRedisException`, `UnsupportedFeatureError` and `MmdbError` now extend it, giving adapters one catch type for any guard-core failure, mirroring the Python engine.**
+- **The agent seam (W2): `GuardEngine::setAgentHandler` forwards to the event bus and queued events drain on attach.** This is the hook the four adapter repos' agent integrations consume.
+- **`GuardEngine::initializationStatus()`: per-component enabled/ok/error recorded across `initialize()`, the payload the adapters' status routes serve.** Failure semantics unchanged: the original exception still throws, the status is recorded before the throw.
+
+Coverage
+--------
+
+### Changed
+
+- The new surfaces are covered to the 100%-line gate: `bin/test_enrichment.php` (56 assertions), `bin/test_composite_handlers.php` (96), `bin/test_json_logging.php` (34), and `bin/test_parity_seam.php` (7) join the CI runner list, with the provably-unreachable inventory in `.github/coverage-unreachable.php` (composite sink-failure twins, the OTel attribute-type forward skips, the closed-stderr fallback, the double-enrich idempotence arms).
+
 v4.3.0 (2026-10-01)
 -------------------
 
