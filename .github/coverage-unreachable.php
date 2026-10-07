@@ -62,14 +62,6 @@ return [
         22,
     ],
 
-    // Bare-string guards behind ?array parameters: PHP rejects a string
-    // argument with a TypeError before the body runs (verified via
-    // ReflectionMethod::invoke: "Argument #1 ($names) must be of type
-    // ?array, string given").
-    'src/Config/SecurityConfig.php' => [
-        897, 921,
-    ],
-
     // mb_substitute_character(0xfffd) makes mb_convert_encoding(UTF-8,
     // UTF-8) substitute instead of fail for every byte string, so the false
     // branch is dead.
@@ -160,7 +152,7 @@ return [
     // there (it emits the \xNN reporting escape); the 8.2 matrix jobs run
     // without pcov.
     'src/Detection/SusPatterns.php' => [
-        147, 148,
+        200, 201,
     ],
 
     // The scheme position comes from an https?:// match, so the anchored
@@ -256,14 +248,14 @@ return [
         85, 86, 88,
     ],
 
-    // The bare-string guards inside validateSensitiveSet (974) and
-    // validateExclusionSet (998) sit behind typed ?array constructor
+    // The bare-string guards inside validateSensitiveSet (1067) and
+    // validateExclusionSet (1091) sit behind typed ?array constructor
     // parameters: PHP raises the TypeError at the call boundary, so a
     // string can never reach the is_string($names) checks (the same shape
     // as the BehaviorRule entry above). The suites assert the boundary
     // TypeError instead (test_json_logging.php).
     'src/Config/SecurityConfig.php' => [
-        974, 998,
+        1067, 1091,
     ],
 
     // 219: the non-array/non-scalar json_decode guard - json_decode can
@@ -279,7 +271,7 @@ return [
         219, 240, 241, 242, 243,
     ],
 
-    // 313-317: the ip_ban-side initialization catch. Every collaborator
+    // 373-377: the ip_ban-side initialization catch. Every collaborator
     // inside the try fails open or swallows: RateLimitHandler::
     // initializeRedis wraps scriptLoad in its own catch, initializeIpBan
     // only assigns the manager, IpBanManager::initializeRedis migrates
@@ -287,6 +279,6 @@ return [
     // refreshes through the single-flight path that logs its own
     // failures - no input steers a Throwable out of the block.
     'src/Engine/GuardEngine.php' => [
-        313, 314, 315, 316, 317,
+        373, 374, 375, 376, 377,
     ],
 ];

@@ -8,6 +8,7 @@ use RenzoFranceschini\GuardCore\Ban\IpBanManager;
 use RenzoFranceschini\GuardCore\Config\SecurityConfig;
 use RenzoFranceschini\GuardCore\GeoIp\CountryResolver;
 use RenzoFranceschini\GuardCore\Ip\CanonicalIp;
+use RenzoFranceschini\GuardCore\Logging\RequestLogger;
 use RenzoFranceschini\GuardCore\Pipeline\SecurityCheck;
 use RenzoFranceschini\GuardCore\Request\GuardRequest;
 use RenzoFranceschini\GuardCore\Request\GuardResponse;
@@ -22,9 +23,10 @@ final class IpSecurityCheck extends SecurityCheck
         GuardResponseFactory $responseFactory,
         private readonly ?IpBanManager $ipBanManager,
         private readonly RouteResolver $routeResolver,
-        private readonly ?CountryResolver $geoIpHandler = null
+        private readonly ?CountryResolver $geoIpHandler = null,
+        ?RequestLogger $logger = null
     ) {
-        parent::__construct($config, $responseFactory);
+        parent::__construct($config, $responseFactory, $logger);
     }
 
     public function checkName(): string
@@ -124,25 +126,50 @@ final class IpSecurityCheck extends SecurityCheck
         // closed only when the allowlist is restrictive (the blocklist
         // mode cannot confirm a country and lets the request pass), and
         // the allowlist takes precedence over the blocklist. The deny
-        // reasons match the reference block reasons.
+        // reasons match the reference block reasons. The non-block
+        // verdicts carry the reference _log_country_check_result lines:
+        // the loopback and no-geolocation skips at debug, the whitelisted
+        // and not-affected verdicts at log_country_check_level; the block
+        // verdict keeps riding log_suspicious_level through the stash.
         if (!$this->hasCountryRules() || $skipCountries) {
             // fall through to exempt resolution below
         } elseif (CanonicalIp::isLoopback($clientIp)) {
             // loopback exempt from the global country stage
+            $this->logger->log('debug', "Loopback IP exempt from country allowlist check {$clientIp}", [
+                'check' => $this->checkName(),
+                'path' => $request->urlPath(),
+                'method' => $request->method(),
+            ]);
         } else {
-            $country = $this->geoIpHandler?->getCountry($clientIp);
+            $country = $this->resolveCountry($request, $clientIp);
             $allowed = $this->config->whitelistCountries;
             $blocked = $this->config->blockedCountries;
             if ($country === null || $country === '') {
+                $this->logger->log('debug', "IP not geolocated {$clientIp} - IP geolocation failed", [
+                    'check' => $this->checkName(),
+                    'path' => $request->urlPath(),
+                    'method' => $request->method(),
+                ]);
                 if ($allowed !== []) {
                     return $this->deny($request, $clientIp, self::GENERIC_LIST_BLOCK_REASON);
                 }
             } elseif ($allowed !== []) {
-                if (!in_array($country, $allowed, true)) {
+                if (in_array($country, $allowed, true)) {
+                    $this->logCountryVerdict(
+                        $request,
+                        "IP from whitelisted country {$clientIp} - {$country} - IP from whitelisted country"
+                    );
+                } else {
                     return $this->deny($request, $clientIp, "IP from blocked country: {$country}");
                 }
             } elseif (in_array($country, $blocked, true)) {
                 return $this->deny($request, $clientIp, "IP from blocked country: {$country}");
+            } else {
+                $this->logCountryVerdict(
+                    $request,
+                    "IP not from blocked or whitelisted country {$clientIp} - {$country}"
+                    . ' - IP not from blocked or whitelisted country'
+                );
             }
         }
 
@@ -247,6 +274,32 @@ final class IpSecurityCheck extends SecurityCheck
         }
 
         return $this->geoIpHandler !== null;
+    }
+
+    /**
+     * The country lookup through the injected resolver; PR-seamed so the
+     * lookup-failure handling attaches to exactly one site.
+     */
+    private function resolveCountry(GuardRequest $request, string $clientIp): ?string
+    {
+        return $this->geoIpHandler?->getCountry($clientIp);
+    }
+
+    /**
+     * _log_country_check_result's non-block verdict line at
+     * log_country_check_level (default INFO, null disables).
+     */
+    private function logCountryVerdict(GuardRequest $request, string $message): void
+    {
+        $level = $this->config->logCountryCheckLevel;
+        if ($level === null) {
+            return;
+        }
+        $this->logger->log(strtolower($level), $message, [
+            'check' => $this->checkName(),
+            'path' => $request->urlPath(),
+            'method' => $request->method(),
+        ]);
     }
 
     /**

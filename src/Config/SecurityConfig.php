@@ -102,6 +102,23 @@ final class SecurityConfig
 
     public readonly float $detectionSemanticThreshold;
 
+    /**
+     * The anomaly score required to flag a request as a threat
+     * (detection_threat_score_threshold, reference default 1.0, bounds
+     * [0.0, 10.0]): the regex-threat weight sum is compared against this
+     * gate in the detect() verdict instead of the hardcoded 1.0.
+     */
+    public readonly float $detectionThreatScoreThreshold;
+
+    /**
+     * Optional disk-backed pattern-validation cache path
+     * (detection_pattern_validation_cache_path): when set, the empirical
+     * cost-verdict outcome of the ReDoS validator is cached keyed by
+     * pattern, flags and engine version, so a boot reuses prior
+     * certifications instead of re-timing every custom pattern.
+     */
+    public readonly ?string $detectionPatternValidationCachePath;
+
     public readonly int $detectionBinaryMinRunLength;
 
     /** @var array<string, true> */
@@ -237,6 +254,46 @@ final class SecurityConfig
 
     public readonly ?string $logRequestLevel;
 
+    /**
+     * Log level for per-request country verdicts that are not blocks
+     * (log_country_check_level, reference default "INFO"; null disables):
+     * the whitelisted and not-affected verdicts log at this level, the
+     * block verdict keeps riding log_suspicious_level.
+     */
+    public readonly ?string $logCountryCheckLevel;
+
+    /**
+     * Seconds between health checks on pooled connections
+     * (redis_health_check_interval, reference default 30, ge 0): a socket
+     * idle longer than this is PING-probed before reuse and recycled on
+     * failure, so the first request after an idle period does not fail.
+     * 0 disables health checks.
+     */
+    public readonly int $redisHealthCheckInterval;
+
+    /**
+     * Cap on the Redis connection pool size (redis_max_connections,
+     * reference default null): the self-hosted client is a
+     * single-active-connection design under PHP's request-scoped runtime,
+     * so the cap bounds the recycle path (a stale socket is closed before
+     * any replacement opens); null keeps the shipped default.
+     */
+    public readonly ?int $redisMaxConnections;
+
+    /**
+     * Number of retries with capped exponential backoff on transient
+     * Redis connection/timeout errors before surfacing them
+     * (redis_retries, reference default 1, ge 0). 0 disables retries.
+     */
+    public readonly int $redisRetries;
+
+    /**
+     * When true, an enabled agent handler that cannot be attached (it does
+     * not expose the sendEvent surface) raises at attach time instead of
+     * degrading to agent-off (agent_strict, reference default false).
+     */
+    public readonly bool $agentStrict;
+
     /** @var (\Closure(object, array<string, mixed>): void)|null */
     public readonly ?\Closure $onBlock;
 
@@ -313,6 +370,8 @@ final class SecurityConfig
         ?bool $enablePenetrationDetection = null,
         ?array $enabledDetectionCategories = null,
         ?float $detectionSemanticThreshold = null,
+        ?float $detectionThreatScoreThreshold = null,
+        ?string $detectionPatternValidationCachePath = null,
         ?int $detectionBinaryMinRunLength = null,
         ?array $excludedDetectionParams = null,
         ?array $excludedDetectionBodyFields = null,
@@ -355,6 +414,11 @@ final class SecurityConfig
         ?\Closure $authVerifier = null,
         ?string $logSuspiciousLevel = null,
         ?string $logRequestLevel = null,
+        ?string $logCountryCheckLevel = 'INFO',
+        ?int $redisHealthCheckInterval = null,
+        ?int $redisMaxConnections = null,
+        ?int $redisRetries = null,
+        ?bool $agentStrict = null,
         ?bool $enableEnrichment = null,
         ?string $agentProjectId = null,
         ?string $otelServiceName = null,
@@ -402,6 +466,11 @@ final class SecurityConfig
         if ($this->detectionSemanticThreshold < 0.0 || $this->detectionSemanticThreshold > 1.0) {
             throw new \InvalidArgumentException('detection_semantic_threshold must be within [0.0, 1.0]');
         }
+        $this->detectionThreatScoreThreshold = $detectionThreatScoreThreshold ?? 1.0;
+        if ($this->detectionThreatScoreThreshold < 0.0 || $this->detectionThreatScoreThreshold > 10.0) {
+            throw new \InvalidArgumentException('detection_threat_score_threshold must be within [0.0, 10.0]');
+        }
+        $this->detectionPatternValidationCachePath = $detectionPatternValidationCachePath;
         $this->detectionBinaryMinRunLength = $detectionBinaryMinRunLength ?? 16;
         if ($this->detectionBinaryMinRunLength < 4 || $this->detectionBinaryMinRunLength > 1024) {
             throw new \InvalidArgumentException('detection_binary_min_run_length must be within [4, 1024]');
@@ -476,6 +545,23 @@ final class SecurityConfig
         $this->authVerifier = $authVerifier;
         $this->logSuspiciousLevel = $this->validateLogLevel($logSuspiciousLevel, 'log_suspicious_level', 'WARNING');
         $this->logRequestLevel = $this->validateLogLevel($logRequestLevel, 'log_request_level', null);
+        // An explicit null disables the country verdict lines (the
+        // reference field's Optional level), so the parameter default
+        // carries the reference default "INFO" and null passes through.
+        $this->logCountryCheckLevel = $this->validateLogLevel($logCountryCheckLevel, 'log_country_check_level', null);
+        $this->redisHealthCheckInterval = $redisHealthCheckInterval ?? 30;
+        if ($this->redisHealthCheckInterval < 0) {
+            throw new \InvalidArgumentException('redis_health_check_interval must be >= 0');
+        }
+        if ($redisMaxConnections !== null && $redisMaxConnections < 1) {
+            throw new \InvalidArgumentException('redis_max_connections must be >= 1');
+        }
+        $this->redisMaxConnections = $redisMaxConnections;
+        $this->redisRetries = $redisRetries ?? 1;
+        if ($this->redisRetries < 0) {
+            throw new \InvalidArgumentException('redis_retries must be >= 0');
+        }
+        $this->agentStrict = $agentStrict ?? false;
 
         $this->enableCors = $enableCors ?? false;
         // CORS surface, mirrored from the reference cors_* SecurityConfig
@@ -741,6 +827,8 @@ final class SecurityConfig
             'enablePenetrationDetection' => $this->enablePenetrationDetection,
             'enabledDetectionCategories' => array_keys($this->enabledDetectionCategories),
             'detectionSemanticThreshold' => $this->detectionSemanticThreshold,
+            'detectionThreatScoreThreshold' => $this->detectionThreatScoreThreshold,
+            'detectionPatternValidationCachePath' => $this->detectionPatternValidationCachePath,
             'detectionBinaryMinRunLength' => $this->detectionBinaryMinRunLength,
             'excludedDetectionParams' => array_keys($this->excludedDetectionParams),
             'excludedDetectionBodyFields' => array_keys($this->excludedDetectionBodyFields),
@@ -777,6 +865,11 @@ final class SecurityConfig
             'authVerifier' => $this->authVerifier,
             'logSuspiciousLevel' => $this->logSuspiciousLevel,
             'logRequestLevel' => $this->logRequestLevel,
+            'logCountryCheckLevel' => $this->logCountryCheckLevel,
+            'redisHealthCheckInterval' => $this->redisHealthCheckInterval,
+            'redisMaxConnections' => $this->redisMaxConnections,
+            'redisRetries' => $this->redisRetries,
+            'agentStrict' => $this->agentStrict,
             'customRequestCheck' => $this->customRequestCheck,
             'enableEnrichment' => $this->enableEnrichment,
             'agentProjectId' => $this->agentProjectId,
