@@ -324,8 +324,17 @@ $composite = AgentHandlerComposer::compose(
 $engine->setAgentHandler($composite);
 $blocked = new SimpleGuardRequest(method: 'GET', urlPath: '/data', headers: [], clientHost: '203.0.113.99');
 $engine->execute($blocked);
-$t->same(1, count($sink->events), 'blocked request emitted exactly one event');
-$emitted = $sink->events[0] ?? null;
+// The block event plus the security_headers_applied tick the blocked
+// response carries (the reference emits both: the block through the bus,
+// the headers through the response factory's headers manager).
+$t->same(2, count($sink->events), 'blocked request emitted the block event and the headers tick');
+$emitted = null;
+foreach ($sink->events as $candidate) {
+    if ($candidate->eventType !== EventTypes::EVENT_SECURITY_HEADERS_APPLIED) {
+        $emitted = $candidate;
+        break;
+    }
+}
 $t->truthy($emitted !== null && isset($emitted->metadata[EventTypes::ENRICHMENT_KEY_THREAT_SCORE]), 'emitted event carries a threat score');
 $t->truthy($emitted !== null && ($emitted->metadata[EventTypes::ENRICHMENT_KEY_THREAT_SCORE] ?? 0) === ThreatScorer::scoreFor($emitted->eventType), 'emitted threat score matches the event type map');
 $t->truthy($emitted !== null && ($emitted->metadata[EventTypes::ENRICHMENT_KEY_SERVICE_NAME] ?? '') === 'edge-svc', 'emitted event carries the service name');

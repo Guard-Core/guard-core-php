@@ -6,6 +6,8 @@ namespace RenzoFranceschini\GuardCore\Pipeline\Checks;
 
 use RenzoFranceschini\GuardCore\Cloud\CloudManager;
 use RenzoFranceschini\GuardCore\Config\SecurityConfig;
+use RenzoFranceschini\GuardCore\Events\EventBus;
+use RenzoFranceschini\GuardCore\Events\EventTypes;
 use RenzoFranceschini\GuardCore\Logging\LogActivity;
 use RenzoFranceschini\GuardCore\Pipeline\CheckFactory;
 use RenzoFranceschini\GuardCore\Pipeline\SecurityCheck;
@@ -21,7 +23,8 @@ final class CloudProviderCheck extends SecurityCheck
         SecurityConfig $config,
         GuardResponseFactory $responseFactory,
         private readonly CloudManager $cloudManager,
-        private readonly RouteResolver $routeResolver
+        private readonly RouteResolver $routeResolver,
+        private readonly ?EventBus $eventBus = null
     ) {
         parent::__construct($config, $responseFactory);
     }
@@ -84,6 +87,34 @@ final class CloudProviderCheck extends SecurityCheck
 
         if (!$this->cloudManager->isCloudIp($clientIp, $providers)) {
             return null;
+        }
+
+        // The reference _emit_cloud_block_events: the bus-level cloud events
+        // (cloud_blocked plus the access_control decorator_violation when a
+        // forwarded route blocks), then the check's own block_clouds
+        // decorator_violation for a route-level block - the reference check
+        // passes a null route to the bus for exactly that case.
+        $routeBlocksClouds = $routeConfig !== null && $routeConfig->blockCloudProviders !== [];
+        $this->eventBus?->sendCloudDetectionEvents(
+            $request,
+            $clientIp,
+            $providers,
+            $routeBlocksClouds ? null : $routeConfig,
+            $this->cloudManager,
+            $this->config->passiveMode
+        );
+        if ($routeBlocksClouds) {
+            $this->eventBus?->sendMiddlewareEvent(
+                EventTypes::EVENT_DECORATOR_VIOLATION,
+                $request,
+                $this->config->passiveMode ? 'logged_only' : 'request_blocked',
+                "Cloud provider IP {$clientIp} blocked",
+                [
+                    'decorator_type' => 'block_clouds',
+                    'violation_type' => 'cloud_provider',
+                    'blocked_providers' => $providers,
+                ]
+            );
         }
 
         LogActivity::log(

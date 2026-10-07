@@ -6,6 +6,8 @@ namespace RenzoFranceschini\GuardCore\Pipeline\Checks;
 
 use RenzoFranceschini\GuardCore\Ban\IpBanManager;
 use RenzoFranceschini\GuardCore\Config\SecurityConfig;
+use RenzoFranceschini\GuardCore\Events\EventBus;
+use RenzoFranceschini\GuardCore\Events\EventTypes;
 use RenzoFranceschini\GuardCore\GeoIp\CountryResolver;
 use RenzoFranceschini\GuardCore\Ip\CanonicalIp;
 use RenzoFranceschini\GuardCore\Logging\RequestLogger;
@@ -24,7 +26,8 @@ final class IpSecurityCheck extends SecurityCheck
         private readonly ?IpBanManager $ipBanManager,
         private readonly RouteResolver $routeResolver,
         private readonly ?CountryResolver $geoIpHandler = null,
-        ?RequestLogger $logger = null
+        ?RequestLogger $logger = null,
+        private readonly ?EventBus $eventBus = null
     ) {
         parent::__construct($config, $responseFactory, $logger);
     }
@@ -160,9 +163,23 @@ final class IpSecurityCheck extends SecurityCheck
                         "IP from whitelisted country {$clientIp} - {$country} - IP from whitelisted country"
                     );
                 } else {
+                    $this->sendCountryBlockedEvent(
+                        $clientIp,
+                        $country,
+                        "Country {$country} not in allowed list",
+                        'country_whitelist'
+                    );
+
                     return $this->deny($request, $clientIp, "IP from blocked country: {$country}");
                 }
             } elseif (in_array($country, $blocked, true)) {
+                $this->sendCountryBlockedEvent(
+                    $clientIp,
+                    $country,
+                    "Country {$country} is blocked",
+                    'country_blacklist'
+                );
+
                 return $this->deny($request, $clientIp, "IP from blocked country: {$country}");
             } else {
                 $this->logCountryVerdict(
@@ -277,12 +294,43 @@ final class IpSecurityCheck extends SecurityCheck
     }
 
     /**
-     * The country lookup through the injected resolver; PR-seamed so the
-     * lookup-failure handling attaches to exactly one site.
+     * The country lookup through the injected resolver; a resolver failure
+     * emits the reference geo_lookup_failed event (handler "ipinfo",
+     * action lookup_failed) and reports a miss, never a raise - the
+     * reference get_country catches internally and emits the same event.
      */
     private function resolveCountry(GuardRequest $request, string $clientIp): ?string
     {
-        return $this->geoIpHandler?->getCountry($clientIp);
+        try {
+            return $this->geoIpHandler->getCountry($clientIp);
+        } catch (\Throwable $e) {
+            $this->eventBus?->sendHandlerEvent(
+                EventTypes::EVENT_GEO_LOOKUP_FAILED,
+                'ipinfo',
+                $clientIp,
+                'lookup_failed',
+                'Geographic lookup failed: ' . (new \ReflectionClass($e))->getShortName()
+            );
+
+            return null;
+        }
+    }
+
+    /**
+     * The reference check_country_access country_blocked event (handler
+     * "ipinfo", action request_blocked, the country and rule_type
+     * metadata).
+     */
+    private function sendCountryBlockedEvent(string $clientIp, string $country, string $reason, string $ruleType): void
+    {
+        $this->eventBus?->sendHandlerEvent(
+            EventTypes::EVENT_COUNTRY_BLOCKED,
+            'ipinfo',
+            $clientIp,
+            'request_blocked',
+            $reason,
+            ['country' => $country, 'rule_type' => $ruleType]
+        );
     }
 
     /**

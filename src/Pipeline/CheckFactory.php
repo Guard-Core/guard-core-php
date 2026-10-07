@@ -11,6 +11,7 @@ use RenzoFranceschini\GuardCore\Config\SecurityConfig;
 use RenzoFranceschini\GuardCore\Detection\PerformanceMonitor;
 use RenzoFranceschini\GuardCore\Detection\SusPatterns;
 use RenzoFranceschini\GuardCore\Detection\Redos\ValidationCache;
+use RenzoFranceschini\GuardCore\Events\EventBus;
 use RenzoFranceschini\GuardCore\GeoIp\CountryResolver;
 use RenzoFranceschini\GuardCore\Pipeline\Checks\AuthenticationCheck;
 use RenzoFranceschini\GuardCore\Pipeline\Checks\CloudIpRefreshCheck;
@@ -57,6 +58,8 @@ final class CheckFactory
 
     private readonly ?CountryResolver $geoIpHandler;
 
+    private readonly ?EventBus $eventBus;
+
     public function __construct(
         private readonly GuardResponseFactory $responseFactory,
         private readonly RouteResolver $routeResolver = new RouteResolver(),
@@ -65,11 +68,13 @@ final class CheckFactory
         ?SusPatterns $susPatterns = null,
         ?CloudManager $cloudManager = null,
         ?CountryResolver $geoIpHandler = null,
-        private readonly ?SuspiciousCountStore $suspiciousCountStore = null
+        private readonly ?SuspiciousCountStore $suspiciousCountStore = null,
+        ?EventBus $eventBus = null
     ) {
         $this->susPatterns = $susPatterns;
         $this->cloudManager = $cloudManager ?? new CloudManager();
         $this->geoIpHandler = $geoIpHandler;
+        $this->eventBus = $eventBus;
     }
     /**
      * Spec 03 helpers.route_config_applies: when route_configs is null (no
@@ -120,8 +125,8 @@ final class CheckFactory
             'custom_validators' => new CustomValidatorsCheck($config, $this->responseFactory),
             'time_window' => new TimeWindowCheck($config, $this->responseFactory),
             'cloud_ip_refresh' => new CloudIpRefreshCheck($config, $this->responseFactory, $this->cloudManager, $this->routeResolver),
-            'ip_security' => new IpSecurityCheck($config, $this->responseFactory, $this->ipBanManager, $this->routeResolver, $this->geoIpHandler),
-            'cloud_provider' => new CloudProviderCheck($config, $this->responseFactory, $this->cloudManager, $this->routeResolver),
+            'ip_security' => new IpSecurityCheck($config, $this->responseFactory, $this->ipBanManager, $this->routeResolver, $this->geoIpHandler, null, $this->eventBus),
+            'cloud_provider' => new CloudProviderCheck($config, $this->responseFactory, $this->cloudManager, $this->routeResolver, $this->eventBus),
             'user_agent' => new UserAgentCheck($config, $this->responseFactory),
             'rate_limit' => new RateLimitCheck($config, $this->responseFactory, $this->rateLimitHandler, $this->routeResolver),
             'suspicious_activity' => new SuspiciousActivityCheck(
