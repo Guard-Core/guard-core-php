@@ -144,9 +144,9 @@ final class EventBus
     {
         $httpsUrl = LogRedactor::redactUrlForDisplay(
             $request->urlReplaceScheme('https'),
-            $this->config->logSensitiveParams,
-            $this->config->logSensitiveBodyFields,
-            $this->config->logSensitiveHeaders
+            array_keys($this->config->logSensitiveParams),
+            array_keys($this->config->logSensitiveBodyFields),
+            array_keys($this->config->logSensitiveHeaders)
         );
         if ($routeConfig !== null && $routeConfig->requireHttps) {
             $this->sendMiddlewareEvent(
@@ -246,9 +246,9 @@ final class EventBus
                 ? LogRedactor::redactBlob(
                     $rawUserAgent,
                     LogRedactor::sensitiveNames(
-                        $this->config->logSensitiveParams,
-                        $this->config->logSensitiveBodyFields,
-                        $this->config->logSensitiveHeaders
+                        array_keys($this->config->logSensitiveParams),
+                        array_keys($this->config->logSensitiveBodyFields),
+                        array_keys($this->config->logSensitiveHeaders)
                     )
                 )
                 : $rawUserAgent,
@@ -256,9 +256,9 @@ final class EventBus
             reason: $reason,
             endpoint: LogRedactor::redactUrlForDisplay(
                 $request->urlPath(),
-                $this->config->logSensitiveParams,
-                $this->config->logSensitiveBodyFields,
-                $this->config->logSensitiveHeaders
+                array_keys($this->config->logSensitiveParams),
+                array_keys($this->config->logSensitiveBodyFields),
+                array_keys($this->config->logSensitiveHeaders)
             ),
             method: $request->method(),
             handlerName: 'middleware',

@@ -303,5 +303,22 @@ $disabledEngine->initialize();
 $disabledEngine->execute(new SimpleGuardRequest(urlPath: '/quiet', clientHost: '198.51.100.8'));
 $t->truthy(!in_array(EventTypes::EVENT_SECURITY_HEADERS_APPLIED, $disabledAgent->types(), true), 'disabled headers emit nothing');
 
+$t->section('sensitive-set redaction through the headers event');
+// The sensitive-log config fields are array<string, true> membership maps;
+// the emission converts them to the redactor's name lists (a non-empty set
+// must not fatal the request, the regression behind this case).
+$sensitiveAgent = new EvAgent();
+$sensitiveEngine = new GuardEngine(new SecurityConfig(
+    enableRedis: false,
+    logSensitiveHeaders: ['x-forwarded-for', 'x-real-ip'],
+    logSensitiveParams: ['token']
+));
+$sensitiveEngine->setAgentHandler($sensitiveAgent);
+$sensitiveEngine->initialize();
+$sensitiveEngine->execute(new SimpleGuardRequest(urlPath: '/redact-check', clientHost: '198.51.100.8'));
+$sensitiveEvents = array_values(array_filter($sensitiveAgent->received, static fn (object $e): bool => $e->eventType === EventTypes::EVENT_SECURITY_HEADERS_APPLIED));
+$t->same(1, count($sensitiveEvents), 'a non-empty sensitive set still emits the headers event');
+$t->same('/redact-check', $sensitiveEvents[0]->metadata['path'] ?? null, 'the plain path survives the redaction pass');
+
 $t->same(0, $t->failed, 'no failures above');
 exit($t->finish('event emitters'));

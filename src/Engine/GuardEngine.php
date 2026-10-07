@@ -393,9 +393,9 @@ final class GuardEngine
             [
                 'path' => LogRedactor::redactUrlForDisplay(
                     $path,
-                    $this->config->logSensitiveParams,
-                    $this->config->logSensitiveBodyFields,
-                    $this->config->logSensitiveHeaders
+                    array_keys($this->config->logSensitiveParams),
+                    array_keys($this->config->logSensitiveBodyFields),
+                    array_keys($this->config->logSensitiveHeaders)
                 ),
                 'headers_count' => count($headers),
                 'has_csp' => isset($headers['Content-Security-Policy']),
