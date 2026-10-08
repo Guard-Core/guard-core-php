@@ -85,7 +85,7 @@ Inline comments in `index.php` walk through every knob used:
 - Redis via `REDIS_HOST` / `REDIS_PORT` / `REDIS_PREFIX` (compose wires Redis
   in; without it the managers fall back to in-process state)
 - The `onBlock` hook: the telemetry seam for wiring
-  [guard-agent-php](https://github.com/rennf93/guard-agent-php) (comment-level
+  [guard-agent-php](https://github.com/Guard-Core/guard-agent-php) (comment-level
   guidance in `index.php`; agent integration is not implemented in the engine
   port yet, and `enableAgent` fails config validation)
 

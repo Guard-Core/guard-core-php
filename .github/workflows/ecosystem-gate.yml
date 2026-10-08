@@ -32,16 +32,16 @@ jobs:
       fail-fast: false
       matrix:
         consumer:
-          - repo: rennf93/psr15-guard
+          - repo: Guard-Core/psr15-guard
             path: psr15-guard
             test: bin/test_psr15.php
-          - repo: rennf93/slim-guard
+          - repo: Guard-Core/slim-guard
             path: slim-guard
             test: bin/test_slim.php
-          - repo: rennf93/laravel-guard
+          - repo: Guard-Core/laravel-guard
             path: laravel-guard
             test: bin/test_laravel.php
-          - repo: rennf93/symfony-guard
+          - repo: Guard-Core/symfony-guard
             path: symfony-guard
             test: bin/test_symfony.php
 
@@ -77,10 +77,10 @@ jobs:
       # the sibling out next to the consumer (same pattern as slim-guard's
       # own ci.yml); the patch step below stamps it.
       - name: Checkout the psr15-guard path sibling (slim-guard)
-        if: matrix.consumer.repo == 'rennf93/slim-guard'
+        if: matrix.consumer.repo == 'Guard-Core/slim-guard'
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          repository: rennf93/psr15-guard
+          repository: Guard-Core/psr15-guard
           ref: master
           path: psr15-guard
           persist-credentials: false

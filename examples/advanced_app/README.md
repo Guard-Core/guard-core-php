@@ -95,7 +95,7 @@ curl -s -X POST http://localhost/admin/unban -H 'X-Admin-Token: admin-token-chan
 - `excludePaths` so probes never touch the pipeline
 - `logRequestLevel` / `logSuspiciousLevel`
 - `onBlock` hook: the telemetry seam for
-  [guard-agent-php](https://github.com/rennf93/guard-agent-php) wiring
+  [guard-agent-php](https://github.com/Guard-Core/guard-agent-php) wiring
   (comment-level guidance in `src/config.php`; `enableAgent` is fail-closed
   in this port, so the hook is the integration point)
 
