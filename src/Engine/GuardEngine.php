@@ -14,6 +14,7 @@ use RenzoFranceschini\GuardCore\Cors\CorsPolicy;
 use RenzoFranceschini\GuardCore\Detection\PerformanceMonitor;
 use RenzoFranceschini\GuardCore\Detection\SusPatterns;
 use RenzoFranceschini\GuardCore\Detection\Redos\ValidationCache;
+use RenzoFranceschini\GuardCore\Decorators\SecurityDecorator;
 use RenzoFranceschini\GuardCore\Events\EventBus;
 use RenzoFranceschini\GuardCore\Events\EventTypes;
 use RenzoFranceschini\GuardCore\Logging\LogRedactor;
@@ -69,6 +70,8 @@ final class GuardEngine
     private array $headersCache = [];
 
     private readonly ?CorsPolicy $corsPolicy;
+
+    private ?SecurityDecorator $decoratorHandler = null;
 
     private readonly SusPatterns $susPatterns;
 
@@ -157,6 +160,7 @@ final class GuardEngine
             $config,
             array_keys($config->mutedCheckLogs),
             rebuildChecks: fn (): array => $this->checkFactory->buildChecks($this->config),
+            routeConfigRevision: fn (): ?int => $this->decoratorHandler?->routeConfigRevision(),
             log: $log,
             configProvider: fn (): SecurityConfig => $this->config,
             eventBus: $this->eventBus
@@ -219,6 +223,26 @@ final class GuardEngine
             return;
         }
         $this->eventBus->setAgentHandler($agentHandler);
+    }
+
+    /**
+     * set_decorator_handler (fastapi-guard middleware.set_decorator_handler):
+     * attaches the SecurityDecorator family whose decorated endpoints this
+     * engine serves. Requests stamped with a route id
+     * (RequestState::$guardRouteId, set by the adapter after its router
+     * matches a DecoratedEndpoint) resolve their RouteConfig through the
+     * handler's registry (the reference get_route_decorator_config flow),
+     * and every decorator mutation rebuilds the pipeline through the
+     * revision staleness seam.
+     */
+    public function setDecoratorHandler(SecurityDecorator $decoratorHandler): void
+    {
+        $this->decoratorHandler = $decoratorHandler;
+    }
+
+    public function decoratorHandler(): ?SecurityDecorator
+    {
+        return $this->decoratorHandler;
     }
 
     /**
@@ -504,6 +528,13 @@ final class GuardEngine
 
                 return $response;
             }
+        }
+
+        // The reference adapter resolves a decorated endpoint's config by
+        // its stamped route id (get_route_decorator_config) when the
+        // adapter has not attached a route config directly.
+        if ($state->routeConfig === null && $state->guardRouteId !== null && $this->decoratorHandler !== null) {
+            $state->routeConfig = $this->decoratorHandler->getRouteConfig($state->guardRouteId);
         }
 
         $response = $this->pipeline->execute($request);
