@@ -248,14 +248,14 @@ return [
         85, 86, 88,
     ],
 
-    // The bare-string guards inside validateSensitiveSet (1067) and
-    // validateExclusionSet (1091) sit behind typed ?array constructor
+    // The bare-string guards inside validateSensitiveSet (1091) and
+    // validateExclusionSet (1115) sit behind typed ?array constructor
     // parameters: PHP raises the TypeError at the call boundary, so a
     // string can never reach the is_string($names) checks (the same shape
     // as the BehaviorRule entry above). The suites assert the boundary
     // TypeError instead (test_json_logging.php).
     'src/Config/SecurityConfig.php' => [
-        1067, 1091,
+        1091, 1115,
     ],
 
     // 219: the non-array/non-scalar json_decode guard - json_decode can

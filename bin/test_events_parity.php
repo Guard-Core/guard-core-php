@@ -320,5 +320,26 @@ $sensitiveEvents = array_values(array_filter($sensitiveAgent->received, static f
 $t->same(1, count($sensitiveEvents), 'a non-empty sensitive set still emits the headers event');
 $t->same('/redact-check', $sensitiveEvents[0]->metadata['path'] ?? null, 'the plain path survives the redaction pass');
 
+$t->section('config mute lists through the derived filter');
+$mutedAgent = new EvAgent();
+$mutedConfig = new SecurityConfig(
+    enableRedis: false,
+    mutedEventTypes: [EventTypes::EVENT_SECURITY_HEADERS_APPLIED],
+    mutedMetricTypes: [EventTypes::METRIC_RESPONSE_TIME]
+);
+$mutedEngine = new GuardEngine($mutedConfig);
+$mutedEngine->setAgentHandler($mutedAgent);
+$mutedEngine->initialize();
+$mutedEngine->execute(new SimpleGuardRequest(urlPath: '/muted-check', clientHost: '198.51.100.8'));
+$t->truthy(!in_array(EventTypes::EVENT_SECURITY_HEADERS_APPLIED, $mutedAgent->types(), true), 'muted_event_types mutes the headers event through the derived filter');
+$unmutedEngine = new GuardEngine(new SecurityConfig(enableRedis: false));
+$unmutedEngine->setAgentHandler($mutedAgent);
+$unmutedEngine->initialize();
+$unmutedEngine->execute(new SimpleGuardRequest(urlPath: '/unmuted-check', clientHost: '198.51.100.8'));
+$t->truthy(in_array(EventTypes::EVENT_SECURITY_HEADERS_APPLIED, $mutedAgent->types(), true), 'an empty mute list keeps the headers event');
+$t->same([], (new SecurityConfig())->mutedEventTypes, 'muted_event_types defaults to the empty set');
+$t->same([], (new SecurityConfig())->mutedMetricTypes, 'muted_metric_types defaults to the empty set');
+$t->same(['ip_blocked'], (new SecurityConfig(mutedEventTypes: ['ip_blocked']))->mutedEventTypes, 'with() round-trips the mute lists via the constructor');
+
 $t->same(0, $t->failed, 'no failures above');
 exit($t->finish('event emitters'));

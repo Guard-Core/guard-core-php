@@ -32,6 +32,8 @@ final class EventBus
 {
     private ?object $agentHandler;
 
+    private EventFilter $eventFilter;
+
     /** @var list<SecurityEvent> */
     private array $queued = [];
 
@@ -41,10 +43,14 @@ final class EventBus
     public function __construct(
         ?object $agentHandler,
         private readonly SecurityConfig $config,
-        private readonly EventFilter $eventFilter = new EventFilter(),
+        ?EventFilter $eventFilter = null,
         ?callable $countryResolver = null
     ) {
         $this->agentHandler = $agentHandler;
+        // The config's mute lists (muted_event_types / muted_metric_types)
+        // seed the filter; an explicitly injected filter wins over them.
+        $this->eventFilter = $eventFilter
+            ?? new EventFilter($config->mutedEventTypes, $config->mutedMetricTypes);
         $this->countryResolver = $countryResolver === null ? null : $countryResolver(...);
     }
 

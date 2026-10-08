@@ -263,6 +263,24 @@ final class SecurityConfig
     public readonly ?string $logCountryCheckLevel;
 
     /**
+     * Event types muted from telemetry dispatch (muted_event_types,
+     * reference default the empty set): exact identifier strings, applied
+     * by the event bus's EventFilter.
+     *
+     * @var list<string>
+     */
+    public readonly array $mutedEventTypes;
+
+    /**
+     * Metric types muted from telemetry dispatch (muted_metric_types,
+     * reference default the empty set): exact identifier strings, applied
+     * by the event bus's EventFilter.
+     *
+     * @var list<string>
+     */
+    public readonly array $mutedMetricTypes;
+
+    /**
      * Seconds between health checks on pooled connections
      * (redis_health_check_interval, reference default 30, ge 0): a socket
      * idle longer than this is PING-probed before reuse and recycled on
@@ -415,6 +433,8 @@ final class SecurityConfig
         ?string $logSuspiciousLevel = null,
         ?string $logRequestLevel = null,
         ?string $logCountryCheckLevel = 'INFO',
+        ?array $mutedEventTypes = null,
+        ?array $mutedMetricTypes = null,
         ?int $redisHealthCheckInterval = null,
         ?int $redisMaxConnections = null,
         ?int $redisRetries = null,
@@ -549,6 +569,8 @@ final class SecurityConfig
         // reference field's Optional level), so the parameter default
         // carries the reference default "INFO" and null passes through.
         $this->logCountryCheckLevel = $this->validateLogLevel($logCountryCheckLevel, 'log_country_check_level', null);
+        $this->mutedEventTypes = $this->validateStringList($mutedEventTypes ?? [], 'muted_event_types');
+        $this->mutedMetricTypes = $this->validateStringList($mutedMetricTypes ?? [], 'muted_metric_types');
         $this->redisHealthCheckInterval = $redisHealthCheckInterval ?? 30;
         if ($this->redisHealthCheckInterval < 0) {
             throw new \InvalidArgumentException('redis_health_check_interval must be >= 0');
@@ -866,6 +888,8 @@ final class SecurityConfig
             'logSuspiciousLevel' => $this->logSuspiciousLevel,
             'logRequestLevel' => $this->logRequestLevel,
             'logCountryCheckLevel' => $this->logCountryCheckLevel,
+            'mutedEventTypes' => $this->mutedEventTypes,
+            'mutedMetricTypes' => $this->mutedMetricTypes,
             'redisHealthCheckInterval' => $this->redisHealthCheckInterval,
             'redisMaxConnections' => $this->redisMaxConnections,
             'redisRetries' => $this->redisRetries,
