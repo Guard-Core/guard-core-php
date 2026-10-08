@@ -101,7 +101,7 @@ function advanced_config(): SecurityConfig
         logSuspiciousLevel: getenv('LOG_SUSPICIOUS_LEVEL') ?: 'WARNING',
         // Agent wiring (comment-level): guard-core-php's only telemetry seam
         // is onBlock. The PHP agent (guard-agent-php,
-        // https://github.com/rennf93/guard-agent-php) mirrors the Python
+        // https://github.com/Guard-Core/guard-agent-php) mirrors the Python
         // guard-agent's API: once its engine-event pipeline accepts these
         // payloads, replace the log line below with the agent call and set
         // GUARD_AGENT_* env vars here. enableAgent stays false because the

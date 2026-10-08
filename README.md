@@ -3,9 +3,9 @@ Guard Core PHP - API Security Core Engine for PHP language
 
 # guard-core-php
 
-Guard Core PHP: the API security core engine for PHP. A framework-agnostic port of the [guard-core](https://github.com/rennf93/guard-core) detection engine that powers the PHP adapters: [psr15-guard](https://github.com/rennf93/psr15-guard), [laravel-guard](https://github.com/rennf93/laravel-guard), [symfony-guard](https://github.com/rennf93/symfony-guard), and [slim-guard](https://github.com/rennf93/slim-guard).
+Guard Core PHP: the API security core engine for PHP. A framework-agnostic port of the [guard-core](https://github.com/Guard-Core/guard-core) detection engine that powers the PHP adapters: [psr15-guard](https://github.com/Guard-Core/psr15-guard), [laravel-guard](https://github.com/Guard-Core/laravel-guard), [symfony-guard](https://github.com/Guard-Core/symfony-guard), and [slim-guard](https://github.com/Guard-Core/slim-guard).
 
-Docs: <https://rennf93.github.io/guard-core-php/>
+Docs: <https://guard-core.github.io/guard-core-php/>
 
 ## Install
 

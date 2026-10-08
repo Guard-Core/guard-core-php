@@ -87,7 +87,7 @@ function simple_engine(): GuardEngine
     // is not implemented in guard-core-php yet (setting enableAgent fails
     // config validation), so wire the agent from here: forward these
     // payloads to guard-agent-php
-    // (https://github.com/rennf93/guard-agent-php) once its event pipeline
+    // (https://github.com/Guard-Core/guard-agent-php) once its event pipeline
     // accepts engine events. The payload carries check_name, reason,
     // trigger_info, passive_mode, client_ip, path, method, and status_code.
     onBlock: static function (object $request, array $payload): void {

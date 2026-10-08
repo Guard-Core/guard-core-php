@@ -3,7 +3,7 @@ Guidance for AI agents (including Claude Code) working in this repository.
 
 ## Project Overview
 
-rennf93/guard-core-php (https://github.com/rennf93/guard-core-php) is the PHP port of guard-core: the framework-agnostic API security core engine for the guard-core ecosystem. It is a library, not an application: there is no server, no middleware, and nothing to deploy. Framework integration happens in the adapter repos (psr15-guard, slim-guard, laravel-guard, symfony-guard), each of which translates native requests into the engine's `GuardRequest` and block verdicts back into framework responses.
+Guard-Core/guard-core-php (https://github.com/Guard-Core/guard-core-php) is the PHP port of guard-core: the framework-agnostic API security core engine for the guard-core ecosystem. It is a library, not an application: there is no server, no middleware, and nothing to deploy. Framework integration happens in the adapter repos (psr15-guard, slim-guard, laravel-guard, symfony-guard), each of which translates native requests into the engine's `GuardRequest` and block verdicts back into framework responses.
 
 - Composer package `rennf93/guard-core-php`, type `library`, license MIT. PHP `^8.2` with `ext-pcre`, `ext-mbstring`, `ext-json` only (platform-only package: zero composer dependencies, `composer.lock` is a zero-dep lock).
 - Autoload is PSR-4: `RenzoFranceschini\GuardCore\` maps to `src/`. Every file is `declare(strict_types=1)`.
@@ -86,8 +86,8 @@ CI (`.github/workflows/ci.yml`) runs on every push and PR with a PHP matrix of 8
 
 ## Related Projects
 
-- guard-core (Python reference engine): https://github.com/rennf93/guard-core
-- guard-core-go (Go port): https://github.com/rennf93/guard-core-go
-- guard-agent-php (telemetry agent): https://github.com/rennf93/guard-agent-php
-- psr15-guard / slim-guard / laravel-guard / symfony-guard (adapters): https://github.com/rennf93/psr15-guard and siblings
-- guard-core-app (SaaS ingestion API): https://github.com/rennf93/guard-core-app
+- guard-core (Python reference engine): https://github.com/Guard-Core/guard-core
+- guard-core-go (Go port): https://github.com/Guard-Core/guard-core-go
+- guard-agent-php (telemetry agent): https://github.com/Guard-Core/guard-agent-php
+- psr15-guard / slim-guard / laravel-guard / symfony-guard (adapters): https://github.com/Guard-Core/psr15-guard and siblings
+- guard-core-app (SaaS ingestion API): https://github.com/Guard-Core/guard-core-app

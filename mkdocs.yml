@@ -1,8 +1,8 @@
 site_name: guard-core-php
 site_description: API security core engine for PHP - detection, rate limiting, IP banning, and cloud provider blocking
 site_author: Renn F
-repo_url: https://github.com/rennf93/guard-core-php
-repo_name: rennf93/guard-core-php
+repo_url: https://github.com/Guard-Core/guard-core-php
+repo_name: Guard-Core/guard-core-php
 
 theme:
   name: material
