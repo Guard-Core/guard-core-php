@@ -1,5 +1,57 @@
 # Release Notes
 
+v4.3.2 (2026-10-09)
+-------------------
+
+The parity-completion release: guard-core-php 4.3.2 tracks the guard-core 4.3.2 release. The engine gains the decorator family (the per-endpoint SecurityDecorator surface with route identity, the shared revision cell, and the engine decorator-handler seam), the SusPatterns runtime pattern registry with the dynamic-rule suspicious_patterns application, the four missing event emitters (cloud_blocked, country_blocked, geo_lookup_failed, security_headers_applied) with the send_cloud_detection_events bus port, the mutedEventTypes/mutedMetricTypes config fields, and the seven previously missing config fields with their consumers.
+
+The decorator family: SecurityDecorator, RouteDecoration, route identity (PR #60)
+---------------------------------------------------------------------------------
+
+### Added
+
+- **`src/Decorators/SecurityDecorator.php`: the 25 config methods (requireIp, blockCountries, allowCountries, blockClouds, bypass, rateLimit, geoRateLimit, usageMonitor, returnMonitor, behaviorAnalysis, suspiciousFrequency, requireHttps, requireAuth, apiKeyAuth, requireAuthorizationHeader, requireHeaders, blockUserAgents, contentTypeFilter, maxRequestSize, requireReferrer, customValidation, detectionExclusion, timeWindow, suspiciousDetection, honeypotDetection) with reference semantics:** uppercase country normalization, the block_clouds selector validity gate with the unknown-provider warning, the bypass union with decorator-time leniency, the auth/authorization-header mutual exclusion raising at application time, the ReDoS gate refusing unsafe user-agent patterns before decoration, the body-scan gate for body-reading return patterns, and the parse_qs-shaped honeypot validator with Python truthiness. Plus the base infra: config, routeConfigRevision, getRouteConfig, routeConfigs, initializeBehaviorTracking, initializeAgent, and the five send_*_event emitters over the event bus (decorator_type inside the metadata, the agent_enable_events gate honored), and the getRouteDecoratorConfig static.
+- **`src/Decorators/RouteDecoration.php`: the immutable decoration chain, the port of the decorator closures the mixin methods return; decorate() is the application step.** Chaining never mutates the handler or a shared chain, so two factories built from one decorator never bleed into each other (the per-function guarantee).
+- **`src/Decorators/DecoratedEndpoint.php`: the stamped endpoint shell (invokable call-through; pattern shells throw LogicException) and `src/Decorators/RouteConfigRevision.php`: the shared revision cell.**
+- **Route identity (the _get_route_id port):** the stamped id is reused only when this instance assigned it to this endpoint (stacked decorations share one config); otherwise the base id suffixes #2..#n. New routes seed enableSuspiciousDetection from enablePenetrationDetection like _ensure_route_config; every applied decoration bumps the shared cell.
+- **`GuardEngine::setDecoratorHandler` (the set_decorator_handler port):** requests stamped with a route id resolve their RouteConfig through the handler's registry (the get_route_decorator_config flow), and decorator mutations rebuild the pipeline through the revision staleness seam.
+- **`BehaviorRuleValidation::validateReturnPatternAgainstScanFlag`:** the single-pattern scan gate (the _validate_return_pattern_body_scan path), with the list validator refactored onto it. Decorated endpoints flow through the identical pipeline checks: adapters hand the registry (`SecurityDecorator::routeConfigs()`) to the existing path-pattern route maps, or stamp `state->guardRouteId` and let the engine resolve through the handler.
+
+The runtime pattern registry and the seven config fields (PR #57)
+-----------------------------------------------------------------
+
+### Added
+
+- **SusPatterns grows the runtime registry: addPattern/removePattern with the ReDoS safety gate, getDefaultPatterns/getCustomPatterns/getAllPatterns, catalog-row removal tracked as a scan-time skip, and detectPatternMatch (the reference detect_pattern_match projection).** Registry additions scan on every view with no context filter and the custom category (the reference compiled, _CTX_ALL, "custom" tuple semantics), with the same per-pattern scan gates and monitor metrics as a catalog row.
+- **The custom pool persists to Redis ("patterns:custom", comma-joined) and restores on engine initialize(); unsafe persisted rows are skipped with a warning.** pattern_added / pattern_removed events flow through the event bus with handler_name sus_patterns, the system ip, and the redacted source, pool type and pool size. The engine owns the detection engine instance, so the registry survives applyDynamicConfig pipeline rebuilds; GuardEngine exposes susPatterns().
+- **DynamicRuleManager applies suspicious_patterns through the registry (unsafe rows warned and rejected) instead of the skip warning; the reference's expiry semantics carry (registrations are runtime detection state, not config).** SuspiciousActivityCheck exempts the custom category from the enabled-categories gate, mirroring _pattern_should_be_skipped.
+- **The seven missing SecurityConfig fields with reference defaults, validation, and consumers:** detection_threat_score_threshold (1.0, [0.0, 10.0], the detect() verdict gate on the regex-threat anomaly), detection_pattern_validation_cache_path (the disk-backed cost-verdict cache wired into the registry gate, the dynamic-rule user-agent validation and the CheckFactory fallback engine; cheap deterministic layers always re-run), log_country_check_level (INFO, nullable, the whitelisted and not-affected country verdict lines plus the reference debug lines for the loopback and no-geolocation skips), redis_health_check_interval (30, ge 0, the RESP idle-socket PING probe with recycle-on-failure), redis_max_connections (null, ge 1, the pool cap on the recycle path), redis_retries (1, ge 0, the capped-backoff retry wrapper over transient connect/write/read failures, never server-side error replies), and agent_strict (false, the strict agent attach: a handler without the sendEvent surface raises instead of degrading to agent-off).
+
+The four event emitters and send_cloud_detection_events (PR #58)
+----------------------------------------------------------------
+
+### Added
+
+- **`EventBus::sendCloudDetectionEvents`, the reference middleware_events.py port:** the cloud_blocked verdict event (handler cloud, action request_blocked or logged_only in passive mode, the provider and network metadata) plus, when a forwarded route blocks clouds, its access_control decorator_violation.
+- **The cloud_provider check emits the bus cloud events on every block path and its own block_clouds decorator_violation for a route-level block (the reference check passes a null route to the bus for exactly that case).** The ip_security check's country stage emits country_blocked (handler ipinfo, the reference allowlist and blocklist reasons with the country and rule_type metadata) and geo_lookup_failed (a failing resolver reports the lookup failure and a miss, never a raise, mirroring get_country's internal catch).
+- **security_headers_applied emits behind the reference security-headers TTL cache (TTLCache(1000, 300) semantics: one event per config+path per window keyed cfg_{id}_path_{sha256 prefix}, empty paths gated, oldest-first trim matching the single-TTL eviction order),** at the pipeline pass (the headers the adapter applies to the pass-through response) and on blocked responses. The events close the H3 and H6 event-deferral notes and give DynamicRuleManager.matchEvent a live cloud_blocked stream to correlate against.
+
+Muted event and metric types as config fields (PR #59)
+------------------------------------------------------
+
+### Added
+
+- **SecurityConfig grows mutedEventTypes / mutedMetricTypes (validated string lists, with()-safe, the reference default of the empty set, exact identifier strings).** EventBus derives its EventFilter from the config's mute lists when none is injected; an explicitly injected filter still wins (the AgentHandlerComposer wiring keeps precedence).
+
+Coverage
+--------
+
+### Changed
+
+- The new surfaces join the 100%-line coverage gate: `bin/test_decorators.php` (210 assertions, mirroring the reference decorator tests: test_base, test_mixins, test_route_id_per_function, the access-control country/cloud/bypass arms, the advanced honeypot matrix, the detection-exclusion arms), `bin/test_pattern_registry.php` (80), `bin/test_config_fields.php` (69), and `bin/test_events_parity.php` (55) join the CI test steps, the coverage collect list, and the Makefile runners. The ip_ban initialization catch waiver moves with its shifted lines in `.github/coverage-unreachable.php` (same block, same proof).
+
+___
+
 v4.3.1 (2026-10-07)
 -------------------
 
