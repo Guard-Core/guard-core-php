@@ -1,11 +1,59 @@
-# guard-core-php
-Guard Core PHP - API Security Core Engine for PHP language
+<p align="center">
+    <a href="https://guard-core.github.io/guard-core/latest/">
+        <img src="https://guard-core.github.io/guard-core/latest/assets/guard_core_legend.svg" alt="Guard Core">
+    </a>
+</p>
 
-# guard-core-php
+___
 
-Guard Core PHP: the API security core engine for PHP. A framework-agnostic port of the [guard-core](https://github.com/Guard-Core/guard-core) detection engine that powers the PHP adapters: [psr15-guard](https://github.com/Guard-Core/psr15-guard), [laravel-guard](https://github.com/Guard-Core/laravel-guard), [symfony-guard](https://github.com/Guard-Core/symfony-guard), and [slim-guard](https://github.com/Guard-Core/slim-guard).
+<p align="center">
+    <strong>Guard Core PHP: the API security core engine for PHP. A framework-agnostic port of the <a href="https://github.com/Guard-Core/guard-core">guard-core</a> detection engine with Redis-backed rate limiting, IP policy, and payload inspection.</strong>
+</p>
 
-Docs: <https://guard-core.github.io/guard-core-php/>
+<p align="center">
+    <a href="https://packagist.org/packages/rennf93/guard-core-php">
+        <img src="https://img.shields.io/packagist/v/rennf93/guard-core-php?color=0080ff" alt="Packagist version">
+    </a>
+    <a href="https://guard-core.github.io/guard-core-php/latest/">
+        <img src="https://img.shields.io/badge/docs-latest-0080ff.svg" alt="Docs">
+    </a>
+    <a href="https://github.com/Guard-Core/guard-core-php/actions/workflows/release.yml">
+        <img src="https://github.com/Guard-Core/guard-core-php/actions/workflows/release.yml/badge.svg" alt="Release">
+    </a>
+    <a href="https://opensource.org/licenses/MIT">
+        <img src="https://img.shields.io/badge/License-MIT-yellow.svg" alt="License">
+    </a>
+    <a href="https://github.com/Guard-Core/guard-core-php/actions/workflows/ci.yml">
+        <img src="https://github.com/Guard-Core/guard-core-php/actions/workflows/ci.yml/badge.svg" alt="CI">
+    </a>
+</p>
+
+<p align="center">
+    <a href="https://github.com/Guard-Core/guard-core-php/actions/workflows/pages/pages-build-deployment">
+        <img src="https://github.com/Guard-Core/guard-core-php/actions/workflows/pages/pages-build-deployment/badge.svg?branch=gh-pages" alt="PagesBuildDeployment">
+    </a>
+    <a href="https://github.com/Guard-Core/guard-core-php/actions/workflows/docs.yml">
+        <img src="https://github.com/Guard-Core/guard-core-php/actions/workflows/docs.yml/badge.svg" alt="DocsUpdate">
+    </a>
+    <img src="https://img.shields.io/github/last-commit/Guard-Core/guard-core-php?style=flat&amp;logo=git&amp;logoColor=white&amp;color=0080ff" alt="last-commit">
+</p>
+
+<p align="center">
+    <img src="https://img.shields.io/badge/PHP-777BB4.svg?style=flat&logo=php&logoColor=white" alt="PHP"> <img src="https://img.shields.io/badge/Redis-FF4438.svg?style=flat&logo=redis&logoColor=white" alt="Redis">
+    <a href="https://packagist.org/packages/rennf93/guard-core-php">
+        <img src="https://img.shields.io/packagist/dm/rennf93/guard-core-php" alt="Downloads">
+    </a>
+</p>
+
+<p align="center">
+    <a href="https://guard-core.com">Website</a> &middot;
+    <a href="https://guard-core.github.io/guard-core-php/latest/">Docs</a> &middot;
+    <a href="https://playground.guard-core.com">Playground</a> &middot;
+    <a href="https://app.guard-core.com">Dashboard</a> &middot;
+    <a href="https://discord.gg/ZW7ZJbjMkK">Discord</a>
+</p>
+
+---
 
 ## Install
 
