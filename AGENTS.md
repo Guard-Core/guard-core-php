@@ -28,7 +28,7 @@ All of `src/`, namespace `RenzoFranceschini\GuardCore`:
 - `Routing/`: `RouteConfig` (per-route bypasses, rate limits, required headers, auth, time windows) and `RouteResolver` (resolves by `RequestState::$guardRouteId`).
 - `Logging/`: request/suspicious logging with redaction (`LogRedactor`).
 
-Known surface gaps (fail closed or documented, never silently no-op): no route registry on the `GuardEngine` facade (route configs resolve only when a caller wires them), fixed `Too many requests` 429 body (not tunable via `customErrorResponses`), in-process auto-ban violation counters, address-header ssrf exclusion delegated to `logSensitiveHeaders`.
+Known surface gaps (fail closed or documented, never silently no-op): no route registry on the `GuardEngine` facade (route configs resolve only when a caller wires them), fixed `Too many requests` 429 body (not tunable via `customErrorResponses`), in-process auto-ban violation counters.
 
 ## Boundary Rules
 
