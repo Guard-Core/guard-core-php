@@ -3,8 +3,13 @@
 `SecurityConfig` is built through a single constructor of named arguments
 (every field nullable with an engine default). Arguments belonging to features
 this port does not implement, when set to an enabling value, throw
-`UnsupportedFeatureError` (fail closed): guard agent telemetry, and dynamic
-rules.
+`UnsupportedFeatureError` (fail closed).
+
+## Dynamic rules
+
+| Argument | Default | Notes |
+|---|---|---|
+| `enableDynamicRules` | `false` | Lets the dashboard change protection at runtime without a code change. Needs an agent handler to deliver the rules. A rule adds the IPs in its `ip_blacklist` to the blacklist and the IPs in its `ip_whitelist` to the whitelist (`ip_ban_duration` is parsed but not applied, these are not timed bans), adds its `suspicious_patterns` to detection, appends to `block_cloud_providers` and `blocked_user_agents`, merges `endpoint_rate_limits`, and replaces `blocked_countries`, `whitelist_countries`, `rate_limit`, `rate_limit_window`, `enable_penetration_detection`, `enable_ip_banning`, `enable_rate_limiting`, `enable_rate_limit_auto_ban`, `auto_ban_threshold`, `auto_ban_duration`, `emergency_mode` and `emergency_whitelist`. `emergency_mode` also halves the auto-ban threshold. A rule cannot change any other setting. |
 
 ## CORS
 
@@ -62,6 +67,10 @@ URL path, query and headers still scan. Scheduling note: the engine's
 statically-built pipeline schedules the check from the global flag; the
 route-aware scheduling gate lives at the `CheckFactory` level (see
 KNOWN_GAPS).
+
+`excludedSemanticDetectionHeaders` (global `SecurityConfig` field, default empty, and a `RouteConfig` field that merges with it) is an opt-in list of header names whose values skip the semantic analyzer only: the regex passes still scan them. Names match case-insensitively and trimmed. Use it for values such as JWT session cookies that score near the semantic threshold. The decorator form is `detectionExclusion(semanticHeaders: [...])`.
+
+The `Cookie` header is scanned one `name=value` pair at a time (split on `;`, only spaces trimmed so CR and LF stay, empty pairs skipped), each pair taking the same header path, so a session cookie no longer scores as one blob and the semantic opt-out applies to each pair.
 
 ## Behavior rules
 

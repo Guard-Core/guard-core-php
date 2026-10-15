@@ -184,6 +184,15 @@ $t->same(null, $req->state()->guardBlockStash, 'passive suspicious does not stas
 $t->truthy(str_contains($logger->records()[0]['message'], '[PASSIVE MODE] Penetration attempt detected from'), 'passive line lead');
 $t->truthy(str_contains($logger->records()[0]['message'], 'Trigger: trig - Headers:'), 'passive trigger segment');
 
+$logger = new SimpleRequestLogger();
+$req = m3cRequest('/login');
+LogActivity::log($req, $logger, $passiveConfig, logType: 'suspicious', level: 'WARNING', reason: 'Rate limit exceeded for IP: 9.9.9.9', passiveMode: true, checkName: 'rate_limit');
+$passiveNoTrigger = $logger->records()[0]['message'];
+$t->truthy(str_contains($passiveNoTrigger, '[PASSIVE MODE] Suspicious activity detected from'), 'passive line without trigger names itself suspicious activity');
+$t->truthy(!str_contains($passiveNoTrigger, 'Penetration attempt'), 'passive line without trigger is not a penetration attempt');
+$t->truthy(str_contains($passiveNoTrigger, 'Reason: Rate limit exceeded for IP: 9.9.9.9 - Headers:'), 'passive line without trigger keeps the reason');
+$t->truthy(!str_contains($passiveNoTrigger, 'Trigger:'), 'passive line without trigger has no trigger segment');
+
 $payloads = [];
 $hook = function ($request, $payload) use (&$payloads) {
     $payloads[] = $payload;

@@ -130,6 +130,15 @@ final class SecurityConfig
     /** @var array<string, true> */
     public readonly array $excludedDetectionHeaders;
 
+    /**
+     * Opt-in header names (default empty) whose values skip the semantic
+     * analyzer only; regex scanning of them is unchanged
+     * (excluded_semantic_detection_headers).
+     *
+     * @var array<string, true>
+     */
+    public readonly array $excludedSemanticDetectionHeaders;
+
     /** @var list<string> */
     public readonly array $excludePaths;
 
@@ -330,12 +339,14 @@ final class SecurityConfig
      * @param list<string> $excludedDetectionParams query parameter names excluded from penetration detection scanning
      * @param list<string> $excludedDetectionBodyFields body field names excluded from penetration detection scanning (JSON keys at any nesting depth, urlencoded and multipart field names)
      * @param list<string> $excludedDetectionHeaders header names merged into the excluded-header scan: excluded headers skip the ssrf category only when the header is address-carrying or its value parses as an address chain, every other category still scans them
+     * @param list<string> $excludedSemanticDetectionHeaders opt-in header names (default empty) whose values skip the semantic analyzer only, matched case-insensitively and trimmed; regex scanning of them is unchanged. Useful for JWT session cookies that score near the semantic threshold; a Cookie header is scanned one name=value pair at a time and the opt-out applies to each pair
      * @param list<string> $excludePaths
      * @param list<string> $mutedCheckLogs
      * @param list<string> $logSensitiveHeaders
      * @param list<string> $logSensitiveParams
      * @param list<string> $logSensitiveBodyFields
      * @param (\Closure(object, array<string, mixed>): void)|null $onBlock
+     * @param bool|null $enableDynamicRules default false; lets the dashboard change protection at runtime without a code change, and needs an agent handler to deliver the rules: a rule adds the IPs in its ip_blacklist to the blacklist and the IPs in its ip_whitelist to the whitelist (ip_ban_duration is parsed but not applied, these are not timed bans), adds its suspicious_patterns to detection, appends to block_cloud_providers and blocked_user_agents, merges endpoint_rate_limits, and replaces blocked_countries, whitelist_countries, rate_limit, rate_limit_window, enable_penetration_detection, enable_ip_banning, enable_rate_limiting, enable_rate_limit_auto_ban, auto_ban_threshold, auto_ban_duration, emergency_mode and emergency_whitelist (emergency_mode also halves the auto-ban threshold); a rule cannot change any other setting
      * @param list<string> $emergencyWhitelist
      * @param array<int, string> $customErrorResponses per-status-code body overrides
      * @param list<string> $blockedUserAgents regex patterns, subject truncated to 512 chars
@@ -394,6 +405,7 @@ final class SecurityConfig
         ?array $excludedDetectionParams = null,
         ?array $excludedDetectionBodyFields = null,
         ?array $excludedDetectionHeaders = null,
+        ?array $excludedSemanticDetectionHeaders = null,
         ?array $excludePaths = null,
         ?array $mutedCheckLogs = null,
         ?array $logSensitiveHeaders = null,
@@ -498,6 +510,7 @@ final class SecurityConfig
         $this->excludedDetectionParams = $this->validateExclusionSet($excludedDetectionParams, 'excluded_detection_params');
         $this->excludedDetectionBodyFields = $this->validateExclusionSet($excludedDetectionBodyFields, 'excluded_detection_body_fields');
         $this->excludedDetectionHeaders = $this->validateExclusionSet($excludedDetectionHeaders, 'excluded_detection_headers');
+        $this->excludedSemanticDetectionHeaders = $this->validateExclusionSet($excludedSemanticDetectionHeaders, 'excluded_semantic_detection_headers');
         $this->excludePaths = $this->validateExcludePaths($excludePaths ?? self::DEFAULT_EXCLUDE_PATHS);
         $this->mutedCheckLogs = $this->validateNameSet($mutedCheckLogs, self::CHECK_NAME_VALUES, 'muted_check_logs');
         $this->logSensitiveHeaders = $this->validateSensitiveSet($logSensitiveHeaders, 'log_sensitive_headers');
@@ -855,6 +868,7 @@ final class SecurityConfig
             'excludedDetectionParams' => array_keys($this->excludedDetectionParams),
             'excludedDetectionBodyFields' => array_keys($this->excludedDetectionBodyFields),
             'excludedDetectionHeaders' => array_keys($this->excludedDetectionHeaders),
+            'excludedSemanticDetectionHeaders' => array_keys($this->excludedSemanticDetectionHeaders),
             'excludePaths' => $this->excludePaths,
             'mutedCheckLogs' => array_keys($this->mutedCheckLogs),
             'logSensitiveHeaders' => array_keys($this->logSensitiveHeaders),

@@ -311,15 +311,17 @@ final class RouteDecoration
      * @param list<string>|null $params
      * @param list<string>|null $bodyFields
      * @param list<string>|null $categories
+     * @param list<string>|null $semanticHeaders
      */
     public function detectionExclusion(
         ?array $headers = null,
         ?array $params = null,
         ?array $bodyFields = null,
         ?array $categories = null,
-        ?bool $scanBody = null
+        ?bool $scanBody = null,
+        ?array $semanticHeaders = null
     ): self {
-        return $this->with(static function (RouteConfig $rc) use ($headers, $params, $bodyFields, $categories, $scanBody): RouteConfig {
+        return $this->with(static function (RouteConfig $rc) use ($headers, $params, $bodyFields, $categories, $scanBody, $semanticHeaders): RouteConfig {
             $values = [];
             if ($headers !== null) {
                 $values['excludedDetectionHeaders'] = $headers;
@@ -335,6 +337,9 @@ final class RouteDecoration
             }
             if ($scanBody !== null) {
                 $values['detectionScanBody'] = $scanBody;
+            }
+            if ($semanticHeaders !== null) {
+                $values['excludedSemanticDetectionHeaders'] = $semanticHeaders;
             }
 
             return $values === [] ? $rc : $rc->with($values);

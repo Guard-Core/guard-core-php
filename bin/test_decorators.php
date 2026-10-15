@@ -413,6 +413,9 @@ $t->same(['secret'], $rc->excludedDetectionBodyFields, 'detection_exclusion body
 $t->same(['sqli'], $rc->enabledDetectionCategories, 'detection_exclusion categories');
 $t->same(false, $rc->detectionScanBody, 'detection_exclusion scan body');
 $g = dtGuard();
+$g->detectionExclusion(semanticHeaders: ['X-Session'])->decorate('/dex-sem');
+$t->same(['X-Session'], $g->getRouteConfig('/dex-sem')->excludedSemanticDetectionHeaders, 'detection_exclusion semantic headers');
+$g = dtGuard();
 $g->detectionExclusion(params: ['only-one'])->decorate('/dex-partial');
 $rc = $g->getRouteConfig('/dex-partial');
 $t->same(['only-one'], $rc->excludedDetectionParams, 'detection_exclusion partial application');

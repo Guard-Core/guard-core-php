@@ -296,15 +296,17 @@ final class SecurityDecorator
      * @param list<string>|null $params
      * @param list<string>|null $bodyFields
      * @param list<string>|null $categories
+     * @param list<string>|null $semanticHeaders
      */
     public function detectionExclusion(
         ?array $headers = null,
         ?array $params = null,
         ?array $bodyFields = null,
         ?array $categories = null,
-        ?bool $scanBody = null
+        ?bool $scanBody = null,
+        ?array $semanticHeaders = null
     ): RouteDecoration {
-        return (new RouteDecoration($this))->detectionExclusion($headers, $params, $bodyFields, $categories, $scanBody);
+        return (new RouteDecoration($this))->detectionExclusion($headers, $params, $bodyFields, $categories, $scanBody, $semanticHeaders);
     }
 
     // ------------------------------------------------------------------

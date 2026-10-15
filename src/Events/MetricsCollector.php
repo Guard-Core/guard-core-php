@@ -43,6 +43,11 @@ final class MetricsCollector
         $this->agentHandler = $agentHandler;
     }
 
+    public function hasAgentHandler(): bool
+    {
+        return $this->agentHandler !== null;
+    }
+
     public function setAgentHandler(object $agentHandler): void
     {
         $this->agentHandler = $agentHandler;

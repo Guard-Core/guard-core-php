@@ -30,6 +30,12 @@ final class RequestState
 
     public ?bool $guardRouteUnresolved = null;
 
+    /**
+     * Monotonic seconds (hrtime) stamped when the engine starts the pipeline
+     * for this request; the response_time metric is measured from it.
+     */
+    public ?float $pipelineStartedAt = null;
+
     /** @var array{reason: string, trigger_info: string}|null */
     public ?array $guardBlockStash = null;
 

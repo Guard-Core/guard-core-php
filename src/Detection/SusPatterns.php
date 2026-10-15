@@ -670,7 +670,13 @@ final class SusPatterns
         return [$threats, $semanticScore];
     }
 
-    public function detect(string $content, string $ip, string $context): array
+    /**
+     * @param bool $skipSemantic leave the semantic analyzer out for this value
+     *                           (a header listed in excluded_semantic_detection_headers):
+     *                           the regex passes still run, only the semantic threats
+     *                           are dropped
+     */
+    public function detect(string $content, string $ip, string $context, bool $skipSemantic = false): array
     {
         $executionStartNs = hrtime(true);
         $originalContent = $content;
@@ -720,7 +726,7 @@ final class SusPatterns
         $matchedPatterns = array_merge($matchedPatterns, $shortBase64Matched);
         $timeouts = array_merge($timeouts, $shortBase64Timeouts);
 
-        [$semanticThreats] = $this->checkSemanticThreats($processedContent, $originalContent);
+        $semanticThreats = $skipSemantic ? [] : $this->checkSemanticThreats($processedContent, $originalContent)[0];
 
         $threats = array_merge($regexThreats, $semanticThreats);
 
