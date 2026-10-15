@@ -161,11 +161,13 @@ return [
         104,
     ],
 
-    // canonicalNetwork re-runs inet_pton on an address canonicalText already
-    // validated with FILTER_VALIDATE_IP; canonicalText's own inet_pton
-    // follows a FILTER_VALIDATE_IP pass too, so neither can fail.
+    // canonicalNetwork re-runs inet_pton on an address strOf already parsed
+    // (zone-free, rejected above otherwise); parseRaw's and canonicalText's
+    // inet_pton follow a FILTER_VALIDATE_IP IPv6 pass on the same text (a
+    // zone is split off before the filter), so none of them can fail or
+    // return a length other than 16.
     'src/Ip/CanonicalIp.php' => [
-        56, 108,
+        154, 219, 248,
     ],
 
     // The private constructor is never invoked: LogActivity is used
@@ -187,12 +189,13 @@ return [
         225, 231, 243, 245,
     ],
 
-    // The 'unix' trusted-proxy branch requires 'unix' inside
-    // trustedProxies, but SecurityConfig::validateIpCidrList rejects that
-    // entry at construction (verified: "trusted_proxies: invalid IP/CIDR
-    // entry 'unix'").
+    // resolveRightToLeft is entered only when at least one entry to the
+    // right of the depth-selected one is not a trusted proxy, so the walk
+    // from the right always meets an untrusted entry and returns inside the
+    // loop; the trailing return (the reference's final `return None`) is
+    // dead.
     'src/Request/ClientIpResolver.php' => [
-        24, 25, 26, 27, 28, 29,
+        212,
     ],
 
     // The default loopback transport. The handler suites drive the
@@ -255,7 +258,7 @@ return [
     // as the BehaviorRule entry above). The suites assert the boundary
     // TypeError instead (test_json_logging.php).
     'src/Config/SecurityConfig.php' => [
-        1162, 1186,
+        1171, 1195,
     ],
 
     // 219: the non-array/non-scalar json_decode guard - json_decode can

@@ -4,6 +4,8 @@ declare(strict_types=1);
 
 namespace RenzoFranceschini\GuardCore\Pipeline;
 
+use RenzoFranceschini\GuardCore\Ip\CanonicalIp;
+
 final class BlockEvents
 {
     public const ON_BLOCK_EXCLUDED_CHECK_NAMES = ['custom_request', 'custom_validators', 'https_enforcement'];
@@ -21,7 +23,8 @@ final class BlockEvents
         bool $passiveMode,
         ?int $statusCode
     ): array {
-        $clientIp = $request->state()->clientIp ?? $request->clientHost();
+        $host = $request->clientHost();
+        $clientIp = $request->state()->clientIp ?? ($host !== null && $host !== '' ? CanonicalIp::canonicalize($host) : $host);
 
         return [
             'check_name' => $checkName,

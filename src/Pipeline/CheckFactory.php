@@ -114,7 +114,7 @@ final class CheckFactory
     private function buildOne(string $name, SecurityConfig $config): ?SecurityCheck
     {
         return match ($name) {
-            'route_config' => new RouteConfigCheck($config, $this->responseFactory, $this->routeResolver),
+            'route_config' => new RouteConfigCheck($config, $this->responseFactory, $this->routeResolver, $this->eventBus),
             'emergency_mode' => new EmergencyModeCheck($config, $this->responseFactory),
             'https_enforcement' => new HttpsEnforcementCheck($config, $this->responseFactory),
             'request_logging' => new RequestLoggingCheck($config, $this->responseFactory),
