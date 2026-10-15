@@ -54,5 +54,27 @@ foreach ($rows as $row) {
     }
 }
 
+// A configured route whitelist skips the global lists for the request (the
+// reference skip_ip_lists gate); the route stage still runs first.
+$rows = json_decode((string) file_get_contents(__DIR__ . '/../tests/data/ip_list_route_global.json'), true, flags: JSON_THROW_ON_ERROR);
+foreach ($rows as $row) {
+    $label = 'gwl=' . json_encode($row['globalWhitelist']) . ' gbl=' . json_encode($row['globalBlacklist'])
+        . ' rwl=' . json_encode($row['routeWhitelist']) . ' rbl=' . json_encode($row['routeBlacklist']) . ' ip=' . $row['ip'];
+    $engine = new GuardEngine(new SecurityConfig(
+        enableRedis: false,
+        whitelist: $row['globalWhitelist'] === [] ? null : $row['globalWhitelist'],
+        blacklist: $row['globalBlacklist'],
+    ));
+    $request = new SimpleGuardRequest(urlPath: '/', clientHost: $row['ip']);
+    $request->state()->routeConfig = new RouteConfig(ipWhitelist: $row['routeWhitelist'], ipBlacklist: $row['routeBlacklist']);
+    $allowed = $engine->execute($request) === null;
+    if ($allowed === $row['allowed']) {
+        $passed++;
+    } else {
+        $failed++;
+        echo "FAIL route+global {$label}: expected " . var_export($row['allowed'], true) . ', got ' . var_export($allowed, true) . "\n";
+    }
+}
+
 echo "\ntest_ip_list_precedence: {$passed} passed, {$failed} failed\n";
 exit($failed === 0 ? 0 : 1);

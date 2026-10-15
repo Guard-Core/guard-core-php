@@ -77,9 +77,8 @@ final class IpSecurityCheck extends SecurityCheck
         // decides alone (a miss denies, a match passes the route stage; the
         // route blacklist is consulted only without a whitelist), and the route
         // country verdict denies its match or a miss under a restrictive
-        // allowlist. The global lists are still enforced afterwards, so a
-        // route whitelist match never relaxes them; it only clears the
-        // identity flags, and a route allow_countries match clears the
+        // allowlist. A configured route whitelist skips the global
+        // lists and clears the identity flags, and a route allow_countries match clears the
         // global country stage (the reference _route_country_whitelist_matched).
         if ($routeConfig !== null) {
             $routeResponse = $this->checkRouteIpAccess($request, $clientIp, $routeConfig);
@@ -96,10 +95,14 @@ final class IpSecurityCheck extends SecurityCheck
         $whitelist = $this->config->whitelist;
         $whitelistActive = $whitelist !== null && $whitelist !== [];
 
-        // The reference _check_ip_lists_detail: a configured whitelist decides
-        // alone (the blacklist is not consulted); the blacklist applies only
-        // when no whitelist is configured.
-        if ($whitelistActive) {
+        // The reference _check_ip_lists_detail: a configured route whitelist
+        // skips the global lists for the request (skip_ip_lists); otherwise a
+        // configured whitelist decides alone (the blacklist is not consulted)
+        // and the blacklist applies only when no whitelist is configured.
+        if ($routeOverridesIpLists) {
+            // The global lists, and the whitelist-driven country skip, are
+            // not consulted for this request.
+        } elseif ($whitelistActive) {
             $allowed = false;
             foreach ($whitelist as $entry) {
                 if (CanonicalIp::ipInList($clientIp, [$entry])) {
@@ -110,7 +113,7 @@ final class IpSecurityCheck extends SecurityCheck
             if (!$allowed) {
                 return $this->deny($request, $clientIp, self::GENERIC_LIST_BLOCK_REASON);
             }
-            $request->state()->isWhitelisted = !$routeOverridesIpLists;
+            $request->state()->isWhitelisted = true;
             // A global whitelist match skips the country stage (the
             // reference sets skip_countries from the whitelist
             // membership), so a whitelisted IP is never country blocked.
