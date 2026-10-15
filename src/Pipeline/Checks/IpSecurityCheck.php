@@ -73,13 +73,12 @@ final class IpSecurityCheck extends SecurityCheck
         $skipCountries = false;
 
         // The route IP/country stage (check_route_ip_access,
-        // guard_core/core/checks/helpers.py): the route blacklist denies
-        // first, a configured route whitelist takes over the route verdict
-        // (a miss denies, a match passes the route stage), and the route
+        // guard_core/core/checks/helpers.py): a configured route whitelist
+        // decides alone (a miss denies, a match passes the route stage; the
+        // route blacklist is consulted only without a whitelist), and the route
         // country verdict denies its match or a miss under a restrictive
-        // allowlist. The global lists are still enforced afterwards, so a
-        // route whitelist match never relaxes them; it only clears the
-        // identity flags, and a route allow_countries match clears the
+        // allowlist. A configured route whitelist skips the global
+        // lists and clears the identity flags, and a route allow_countries match clears the
         // global country stage (the reference _route_country_whitelist_matched).
         if ($routeConfig !== null) {
             $routeResponse = $this->checkRouteIpAccess($request, $clientIp, $routeConfig);
@@ -96,13 +95,14 @@ final class IpSecurityCheck extends SecurityCheck
         $whitelist = $this->config->whitelist;
         $whitelistActive = $whitelist !== null && $whitelist !== [];
 
-        foreach ($this->config->blacklist as $entry) {
-            if (CanonicalIp::ipInList($clientIp, [$entry])) {
-                return $this->deny($request, $clientIp, self::GENERIC_LIST_BLOCK_REASON);
-            }
-        }
-
-        if ($whitelistActive) {
+        // The reference _check_ip_lists_detail: a configured route whitelist
+        // skips the global lists for the request (skip_ip_lists); otherwise a
+        // configured whitelist decides alone (the blacklist is not consulted)
+        // and the blacklist applies only when no whitelist is configured.
+        if ($routeOverridesIpLists) {
+            // The global lists, and the whitelist-driven country skip, are
+            // not consulted for this request.
+        } elseif ($whitelistActive) {
             $allowed = false;
             foreach ($whitelist as $entry) {
                 if (CanonicalIp::ipInList($clientIp, [$entry])) {
@@ -113,13 +113,19 @@ final class IpSecurityCheck extends SecurityCheck
             if (!$allowed) {
                 return $this->deny($request, $clientIp, self::GENERIC_LIST_BLOCK_REASON);
             }
-            $request->state()->isWhitelisted = !$routeOverridesIpLists;
+            $request->state()->isWhitelisted = true;
             // A global whitelist match skips the country stage (the
             // reference sets skip_countries from the whitelist
             // membership), so a whitelisted IP is never country blocked.
             // The exempt resolution below still runs, like the reference
             // whitelist branch resolving the exempt flag too.
             $skipCountries = true;
+        } else {
+            foreach ($this->config->blacklist as $entry) {
+                if (CanonicalIp::ipInList($clientIp, [$entry])) {
+                    return $this->deny($request, $clientIp, self::GENERIC_LIST_BLOCK_REASON);
+                }
+            }
         }
 
         // Country stage, mirroring _resolve_country_verdict plus
@@ -213,18 +219,18 @@ final class IpSecurityCheck extends SecurityCheck
     private const GENERIC_LIST_BLOCK_REASON = 'IP %s not in global allowlist/blocklist';
 
     /**
-     * check_route_ip_access: the route blacklist denies first, then a
-     * configured route whitelist takes over the route verdict, then the
-     * route country verdict (a blocked-country match denies, a restrictive
+     * check_route_ip_access: a configured route whitelist decides alone
+     * (the route blacklist is consulted only when there is no whitelist),
+     * then the route country verdict (a blocked-country match denies, a restrictive
      * allowlist denies a miss). The deny reason and payload shapes mirror
      * the reference ip_security check.
      */
     private function checkRouteIpAccess(GuardRequest $request, string $clientIp, RouteConfig $routeConfig): ?GuardResponse
     {
         $ipBlocked = false;
-        if ($routeConfig->ipBlacklist !== [] && $this->ipInList($clientIp, $routeConfig->ipBlacklist)) {
-            $ipBlocked = true;
-        } elseif ($routeConfig->ipWhitelist !== [] && !$this->ipInList($clientIp, $routeConfig->ipWhitelist)) {
+        if ($routeConfig->ipWhitelist !== []) {
+            $ipBlocked = !$this->ipInList($clientIp, $routeConfig->ipWhitelist);
+        } elseif ($routeConfig->ipBlacklist !== [] && $this->ipInList($clientIp, $routeConfig->ipBlacklist)) {
             $ipBlocked = true;
         }
 

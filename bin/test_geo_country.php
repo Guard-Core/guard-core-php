@@ -503,14 +503,15 @@ $request->state()->clientIp = '203.0.113.9';
 $response = $engine->execute($request);
 $t->ok($response !== null && $response->statusCode() === 403, 'route ip_blacklist denies its match 403');
 
-// A route whitelist match never relaxes the global lists (the reference
-// keeps the global blacklist enforced afterwards).
+// A configured route whitelist skips the global lists for the request (the
+// reference skip_ip_lists gate), so its match is not denied by the global
+// blacklist.
 $engine = geoEngine(['blacklist' => ['192.0.2.7']]);
 $request = $routeRequest('/private');
 $request->state()->routeConfig = new RouteConfig(ipWhitelist: ['192.0.2.7']);
 $request->state()->clientIp = '192.0.2.7';
 $response = $engine->execute($request);
-$t->ok($response !== null && $response->statusCode() === 403, 'a route whitelist match still hits the global blacklist');
+$t->ok($response === null, 'a route whitelist match skips the global blacklist');
 
 // A route ipWhitelist clears the identity flags for the request (the
 // reference _resolve_is_whitelisted/_resolve_is_exempt skip_ip_lists gate).
