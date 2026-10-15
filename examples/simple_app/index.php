@@ -26,18 +26,6 @@ use RenzoFranceschini\GuardCore\Request\SimpleGuardRequest;
 
 require __DIR__ . '/../../vendor/autoload.php';
 
-// Address headers the Python engine skips when scanning for ssrf patterns.
-// This port has no dedicated excluded-detection-headers knob yet; it does
-// skip headers listed in logSensitiveHeaders during detection scanning, so
-// we route the address headers through it. Without this, a plain
-// "Host: localhost" request is flagged as an ssrf attempt.
-const ADDRESS_HEADERS = [
-    'host', 'origin', 'via', 'x-forwarded-for', 'x-forwarded-host',
-    'x-forwarded-proto', 'x-real-ip', 'x-client-ip', 'x-cluster-client-ip',
-    'cf-connecting-ip', 'true-client-ip', 'fly-client-ip',
-    'x-envoy-external-address',
-];
-
 /**
  * Engine holder. Runtimes that keep the process alive across requests
  * (worker mode under FrankenPHP/RoadRunner-style loops) reuse the instance
@@ -73,8 +61,10 @@ function simple_engine(): GuardEngine
     autoBanDuration: 300,
     // Penetration detection: all categories, default thresholds.
     enablePenetrationDetection: true,
-    // See ADDRESS_HEADERS above.
-    logSensitiveHeaders: ADDRESS_HEADERS,
+    // The engine already skips the ssrf category for the proxy identity
+    // headers (host, x-forwarded-for, x-real-ip, ...), so no header opt-out
+    // is needed here. Add excludedDetectionHeaders for your own
+    // address-carrying headers.
     // Blocked user agents (regex patterns).
     blockedUserAgents: ['badbot', 'evil-crawler', 'sqlmap'],
     // Custom block bodies, keyed by status code.

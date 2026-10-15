@@ -35,17 +35,6 @@ function advanced_int_env(string $key, int $fallback): int
     return (int) $raw;
 }
 
-/** Address headers the Python engine skips when scanning for ssrf patterns. */
-function advanced_address_headers(): array
-{
-    return [
-        'host', 'origin', 'via', 'x-forwarded-for', 'x-forwarded-host',
-        'x-forwarded-proto', 'x-real-ip', 'x-client-ip', 'x-cluster-client-ip',
-        'cf-connecting-ip', 'true-client-ip', 'fly-client-ip',
-        'x-envoy-external-address',
-    ];
-}
-
 function advanced_config(): SecurityConfig
 {
     return new SecurityConfig(
@@ -82,9 +71,9 @@ function advanced_config(): SecurityConfig
         ],
         // Detection: every category, default detector tuning.
         enablePenetrationDetection: true,
-        // See advanced_address_headers() above: without this, nginx's
-        // forwarded headers get flagged as ssrf attempts.
-        logSensitiveHeaders: advanced_address_headers(),
+        // The engine skips the ssrf category for nginx's forwarded headers
+        // (host, x-forwarded-for, x-real-ip, ...) by default; use
+        // excludedDetectionHeaders for your own address-carrying headers.
         // Edge filters.
         blockedUserAgents: ['badbot', 'evil-crawler', 'sqlmap'],
         blockCloudProviders: advanced_split_csv(getenv('BLOCK_CLOUD_PROVIDERS') ?: ''),

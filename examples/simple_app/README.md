@@ -62,13 +62,7 @@ curl -i http://localhost:8080/
 
 ## A note on address headers
 
-The Python engine skips ssrf scanning for address headers (`host`,
-`x-forwarded-for`, `x-real-ip`, ...) automatically. This PHP port does not
-apply that built-in exclusion yet and has no dedicated excluded-detection-
-headers knob; it does skip headers listed in `logSensitiveHeaders` during
-detection scanning, so `index.php` routes the address headers through that
-field. Without it, a plain `Host: localhost` request is flagged as an ssrf
-attempt.
+The engine skips the `ssrf` category for the proxy identity headers (`host`, `x-forwarded-for`, `x-real-ip`, `cf-connecting-ip`, `forwarded`, ...) by default, so a plain `Host: localhost` request is not flagged and `index.php` needs no workaround. Every other category still scans those headers. Pass `excludedDetectionHeaders` to extend the set with your own address-carrying headers, and `excludedSemanticDetectionHeaders` to keep a header out of the semantic analyzer only.
 
 ## Configuration knobs demonstrated
 
