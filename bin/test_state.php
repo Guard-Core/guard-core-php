@@ -109,7 +109,7 @@ $t->same('1.2.3.4', CanonicalIp::canonicalize('[1.2.3.4]'), 'bracketed IPv4 cano
 $t->same('2001:db8::1', CanonicalIp::canonicalize('[2001:0DB8:0000:0000:0000:0000:0000:0001]'), 'bracketed full IPv6 compressed + lowercased');
 $t->same('192.168.1.1', CanonicalIp::canonicalize('::ffff:192.168.1.1'), 'IPv4-mapped collapsed');
 $t->same('10.0.0.1', CanonicalIp::canonicalize('[::ffff:10.0.0.1]'), 'bracketed IPv4-mapped collapsed');
-$t->same('::ffff:102:304%eth0', CanonicalIp::canonicalize('::ffff:1.2.3.4%eth0'), 'scoped IPv4-mapped stays IPv6-rendered with scope');
+$t->same('::ffff:1.2.3.4%eth0', CanonicalIp::canonicalize('::ffff:1.2.3.4%eth0'), 'scoped IPv4-mapped keeps its scope and the reference str() dotted form');
 $t->same('fe80::1%eth0', CanonicalIp::canonicalize('fe80::1%eth0'), 'scope id preserved');
 $t->same('::', CanonicalIp::canonicalize('0:0:0:0:0:0:0:0'), 'all-zero compressed');
 $t->same('2001:0:0:1::1', CanonicalIp::canonicalize('2001:0:0:1:0:0:0:1'), 'longest zero run wins, leftmost on tie');

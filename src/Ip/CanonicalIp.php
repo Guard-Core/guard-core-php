@@ -15,23 +15,121 @@ final class CanonicalIp
         return $value;
     }
 
+    /**
+     * The reference _canonicalize_ip: brackets stripped, an IPv4-mapped
+     * IPv6 address without a zone becomes IPv4, a zoned address keeps its
+     * zone, anything unparseable is returned unchanged.
+     */
     public static function canonicalize(string $value): string
     {
-        $stripped = self::stripBrackets($value);
-        $scopePos = strpos($stripped, '%');
-        if ($scopePos !== false) {
-            $addrPart = substr($stripped, 0, $scopePos);
-            $scope = substr($stripped, $scopePos + 1);
-            $text = self::canonicalText($addrPart, allowV4MappedCollapse: false);
-            if ($text === null) {
-                return $value;
-            }
+        return self::referenceText(self::stripBrackets($value)) ?? $value;
+    }
 
-            return $text . '%' . $scope;
+    /**
+     * The reference _canonical_ip_text over ip_address(): null when the
+     * value is not an address (Python ipaddress acceptance: an IPv6 zone id
+     * is accepted, brackets, ports and an IPv4 zone are not).
+     */
+    public static function referenceText(string $value): ?string
+    {
+        $raw = self::parseRaw($value);
+        if ($raw === null) {
+            return null;
         }
-        $text = self::canonicalText($stripped);
+        if (strlen($raw['bytes']) === 16 && $raw['scope'] === null && self::isV4Mapped($raw['bytes'])) {
+            return inet_ntop(substr($raw['bytes'], 12, 4));
+        }
 
-        return $text ?? $value;
+        return self::renderRaw($raw);
+    }
+
+    /** The reference str(ip_address(value)) (no IPv4-mapped collapse): null when invalid. */
+    public static function strOf(string $value): ?string
+    {
+        $raw = self::parseRaw($value);
+
+        return $raw === null ? null : self::renderRaw($raw);
+    }
+
+    /**
+     * Packed address bytes of ip_address(value), zone dropped, no
+     * IPv4-mapped collapse (an IPv6 address stays a 16-byte value).
+     */
+    public static function packedRaw(string $value): ?string
+    {
+        $raw = self::parseRaw($value);
+
+        return $raw === null ? null : $raw['bytes'];
+    }
+
+    /**
+     * ip_network(value, strict=False): the packed network address and the
+     * prefix length, null when invalid (the reference ValueError).
+     *
+     * @return array{0: string, 1: int}|null
+     */
+    public static function parseNetwork(string $value): ?array
+    {
+        $slash = strrpos($value, '/');
+        if ($slash === false) {
+            return null;
+        }
+        $prefix = substr($value, $slash + 1);
+        $addr = substr($value, 0, $slash);
+        if ($prefix === '' || !ctype_digit($prefix) || str_contains($addr, '%')) {
+            return null;
+        }
+        $bytes = self::packedRaw($addr);
+        if ($bytes === null || (int) $prefix > strlen($bytes) * 8) {
+            return null;
+        }
+
+        return [$bytes, (int) $prefix];
+    }
+
+    /** Whether packed $ip lies in the packed network (the address families must match). */
+    public static function bytesInNetwork(string $ip, string $network, int $prefixLen): bool
+    {
+        if (strlen($ip) !== strlen($network)) {
+            return false;
+        }
+        $bytes = intdiv($prefixLen, 8);
+        if (substr($ip, 0, $bytes) !== substr($network, 0, $bytes)) {
+            return false;
+        }
+        $rem = $prefixLen % 8;
+        if ($rem === 0) {
+            return true;
+        }
+        $mask = (0xff << (8 - $rem)) & 0xff;
+
+        return (ord($ip[$bytes]) & $mask) === (ord($network[$bytes]) & $mask);
+    }
+
+    /**
+     * The reference _ip_in_list (_utils/access_control.py): a bare entry
+     * matches when its canonical form equals the canonical client address,
+     * a CIDR entry by network membership (a zone id never defeats it). A
+     * malformed CIDR entry matches nothing.
+     *
+     * @param list<string> $entries
+     */
+    public static function ipInList(string $ip, array $entries): bool
+    {
+        $canonical = self::canonicalize($ip);
+        $packed = self::packedRaw($canonical);
+        foreach ($entries as $entry) {
+            if (str_contains($entry, '/')) {
+                $network = self::parseNetwork($entry);
+                if ($network !== null && $packed !== null && self::bytesInNetwork($packed, $network[0], $network[1])) {
+                    return true;
+                }
+            } elseif ($canonical === self::canonicalize($entry)) {
+                return true;
+            }
+        }
+
+        return false;
     }
 
     public static function parse(string $value): ?string
@@ -47,8 +145,8 @@ final class CanonicalIp
         }
         $addrPart = substr($cidr, 0, $slash);
         $prefixLen = filter_var(substr($cidr, $slash + 1), FILTER_VALIDATE_INT);
-        $addr = self::canonicalText(self::stripBrackets($addrPart));
-        if ($addr === null || $prefixLen === false) {
+        $addr = self::strOf(self::stripBrackets($addrPart));
+        if ($addr === null || str_contains($addr, '%') || $prefixLen === false) {
             throw new \InvalidArgumentException("Invalid CIDR network '{$cidr}'");
         }
         $bytes = @inet_pton($addr);
@@ -61,7 +159,7 @@ final class CanonicalIp
         }
         $masked = self::clearHostBits($bytes, $prefixLen);
 
-        return self::bytesToText($masked, isV4: strlen($bytes) === 4) . '/' . $prefixLen;
+        return self::renderRaw(['bytes' => $masked, 'scope' => null]) . '/' . $prefixLen;
     }
 
     public static function networkContains(string $network, string $ip): bool
@@ -95,6 +193,48 @@ final class CanonicalIp
             && str_starts_with(inet_ntop(substr($bytes, 12, 4)), '127.');
     }
 
+    /** @return array{bytes: string, scope: ?string}|null */
+    private static function parseRaw(string $value): ?array
+    {
+        if (filter_var($value, FILTER_VALIDATE_IP, FILTER_FLAG_IPV4) !== false) {
+            $bytes = @inet_pton($value);
+
+            return $bytes === false ? null : ['bytes' => $bytes, 'scope' => null];
+        }
+        $addr = $value;
+        $scope = null;
+        $pct = strpos($value, '%');
+        if ($pct !== false) {
+            $addr = substr($value, 0, $pct);
+            $scope = substr($value, $pct + 1);
+            if ($scope === '' || str_contains($scope, '%') || str_contains($scope, '/')) {
+                return null;
+            }
+        }
+        if (filter_var($addr, FILTER_VALIDATE_IP, FILTER_FLAG_IPV6) === false) {
+            return null;
+        }
+        $bytes = @inet_pton($addr);
+        if ($bytes === false || strlen($bytes) !== 16) {
+            return null;
+        }
+
+        return ['bytes' => $bytes, 'scope' => $scope];
+    }
+
+    /** @param array{bytes: string, scope: ?string} $raw */
+    private static function renderRaw(array $raw): string
+    {
+        if (strlen($raw['bytes']) === 4) {
+            return inet_ntop($raw['bytes']);
+        }
+        $text = self::isV4Mapped($raw['bytes'])
+            ? '::ffff:' . inet_ntop(substr($raw['bytes'], 12, 4))
+            : self::bytesToText($raw['bytes']);
+
+        return $raw['scope'] === null ? $text : $text . '%' . $raw['scope'];
+    }
+
     private static function canonicalText(string $value, bool $allowV4MappedCollapse = true): ?string
     {
         if (filter_var($value, FILTER_VALIDATE_IP, FILTER_FLAG_IPV4)) {
@@ -111,7 +251,7 @@ final class CanonicalIp
             return inet_ntop(substr($bytes, 12, 4));
         }
 
-        return self::bytesToText($bytes, isV4: false);
+        return self::bytesToText($bytes);
     }
 
     private static function isV4Mapped(string $bytes16): bool
@@ -141,11 +281,8 @@ final class CanonicalIp
         return $out;
     }
 
-    private static function bytesToText(string $bytes, bool $isV4): string
+    private static function bytesToText(string $bytes): string
     {
-        if ($isV4) {
-            return inet_ntop($bytes);
-        }
         $groups = array_values(unpack('n8', $bytes));
         $hex = array_map(dechex(...), $groups);
         $bestStart = -1;

@@ -141,6 +141,39 @@ final class EventBus
     }
 
     /**
+     * The reference send_agent_event (_utils/agent_events.py): a
+     * handler-named envelope that also carries the request surface
+     * (endpoint, method, user agent). Like the reference it consults
+     * neither the agent_enable_events gate nor the mute filter.
+     *
+     * @param array<string, mixed> $metadata
+     */
+    public function sendRequestHandlerEvent(
+        string $eventType,
+        string $handlerName,
+        string $ipAddress,
+        object $request,
+        string $actionTaken,
+        string $reason,
+        array $metadata = []
+    ): void {
+        $event = $this->buildEvent($eventType, $request, $ipAddress, null, $actionTaken, $reason, $metadata);
+        $this->dispatch(new SecurityEvent(
+            timestamp: $event->timestamp,
+            eventType: $event->eventType,
+            ipAddress: $event->ipAddress,
+            country: null,
+            userAgent: $event->userAgent,
+            actionTaken: $event->actionTaken,
+            reason: $event->reason,
+            endpoint: $event->endpoint,
+            method: $event->method,
+            handlerName: $handlerName,
+            metadata: $metadata
+        ));
+    }
+
+    /**
      * HTTPS violation dispatch: a route-level require_https emits
      * decorator_violation (decorator_type authentication, violation_type
      * require_https); global enforcement emits https_enforced - both with

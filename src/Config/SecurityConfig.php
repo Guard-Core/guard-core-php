@@ -492,7 +492,7 @@ final class SecurityConfig
         $this->passiveMode = $passiveMode ?? false;
         $this->failSecure = $failSecure ?? true;
         $this->routeResolutionStrict = $routeResolutionStrict ?? false;
-        $this->trustedProxies = $this->validateIpCidrList($trustedProxies ?? [], 'trusted_proxies');
+        $this->trustedProxies = $this->validateIpCidrList($trustedProxies ?? [], 'trusted_proxies', trustedProxies: true);
         $this->trustedProxyDepth = $trustedProxyDepth ?? 1;
         if ($this->trustedProxyDepth < 1) {
             throw new \InvalidArgumentException('trusted_proxy_depth must be >= 1');
@@ -986,12 +986,19 @@ final class SecurityConfig
     }
 
     /** @param list<string> $entries @return list<string> */
-    private function validateIpCidrList(array $entries, string $field): array
+    private function validateIpCidrList(array $entries, string $field, bool $trustedProxies = false): array
     {
         $out = [];
         foreach ($entries as $entry) {
             if (!is_string($entry) || $entry === '') {
                 throw new \InvalidArgumentException("{$field}: entries must be non-empty IP or CIDR strings");
+            }
+            // The reference unix-socket token (_validate_trusted_proxies_value
+            // allow_unix): it marks deployments with no peer address and
+            // never matches a real IP.
+            if ($trustedProxies && $entry === 'unix') {
+                $out[] = 'unix';
+                continue;
             }
             if (str_contains($entry, '/')) {
                 try {
@@ -1000,7 +1007,9 @@ final class SecurityConfig
                     throw new \InvalidArgumentException("{$field}: invalid IP/CIDR entry '{$entry}': {$e->getMessage()}");
                 }
             } else {
-                $parsed = CanonicalIp::parse($entry);
+                // trusted_proxies keeps the reference str(ip_address()) spelling:
+                // the connecting peer is compared to it as raw text.
+                $parsed = $trustedProxies ? CanonicalIp::strOf($entry) : CanonicalIp::referenceText($entry);
                 if ($parsed === null) {
                     throw new \InvalidArgumentException("{$field}: invalid IP/CIDR entry '{$entry}'");
                 }

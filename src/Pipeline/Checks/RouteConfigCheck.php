@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace RenzoFranceschini\GuardCore\Pipeline\Checks;
 
 use RenzoFranceschini\GuardCore\Config\SecurityConfig;
+use RenzoFranceschini\GuardCore\Events\EventBus;
 use RenzoFranceschini\GuardCore\Pipeline\SecurityCheck;
 use RenzoFranceschini\GuardCore\Request\ClientIpResolver;
 use RenzoFranceschini\GuardCore\Request\GuardRequest;
@@ -17,7 +18,8 @@ final class RouteConfigCheck extends SecurityCheck
     public function __construct(
         SecurityConfig $config,
         GuardResponseFactory $responseFactory,
-        private readonly RouteResolver $routeResolver
+        private readonly RouteResolver $routeResolver,
+        private readonly ?EventBus $eventBus = null
     ) {
         parent::__construct($config, $responseFactory);
     }
@@ -39,7 +41,7 @@ final class RouteConfigCheck extends SecurityCheck
         if ($resolved !== null || $state->routeConfig === null) {
             $state->routeConfig = $resolved;
         }
-        $state->clientIp = ClientIpResolver::extract($request, $this->config);
+        $state->clientIp = ClientIpResolver::extract($request, $this->config, $this->logger, $this->eventBus);
 
         if ($this->config->routeResolutionStrict && $state->guardRouteUnresolved === true) {
             $reason = 'Route resolution failed; per-route decorator config could not be applied';

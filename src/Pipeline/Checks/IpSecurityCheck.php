@@ -97,7 +97,7 @@ final class IpSecurityCheck extends SecurityCheck
         $whitelistActive = $whitelist !== null && $whitelist !== [];
 
         foreach ($this->config->blacklist as $entry) {
-            if (self::matches($entry, $clientIp)) {
+            if (CanonicalIp::ipInList($clientIp, [$entry])) {
                 return $this->deny($request, $clientIp, self::GENERIC_LIST_BLOCK_REASON);
             }
         }
@@ -105,7 +105,7 @@ final class IpSecurityCheck extends SecurityCheck
         if ($whitelistActive) {
             $allowed = false;
             foreach ($whitelist as $entry) {
-                if (self::matches($entry, $clientIp)) {
+                if (CanonicalIp::ipInList($clientIp, [$entry])) {
                     $allowed = true;
                     break;
                 }
@@ -200,7 +200,7 @@ final class IpSecurityCheck extends SecurityCheck
         // the flag entirely.
         if (!$routeOverridesIpLists && $this->config->exemptIps !== []) {
             foreach ($this->config->exemptIps as $entry) {
-                if (self::matches($entry, $clientIp)) {
+                if (CanonicalIp::ipInList($clientIp, [$entry])) {
                     $request->state()->isExempt = true;
                     break;
                 }
@@ -275,13 +275,7 @@ final class IpSecurityCheck extends SecurityCheck
     /** @param list<string> $entries */
     private function ipInList(string $ip, array $entries): bool
     {
-        foreach ($entries as $entry) {
-            if (self::matches($entry, $ip)) {
-                return true;
-            }
-        }
-
-        return false;
+        return CanonicalIp::ipInList($ip, $entries);
     }
 
     private function hasCountryRules(): bool
@@ -367,16 +361,5 @@ final class IpSecurityCheck extends SecurityCheck
         $this->firePassiveBlockHook($request, $reason, '');
 
         return null;
-    }
-
-    private static function matches(string $entry, string $ip): bool
-    {
-        if (str_contains($entry, '/')) {
-            $addr = CanonicalIp::parse($ip);
-
-            return $addr !== null && CanonicalIp::networkContains($entry, $addr);
-        }
-
-        return CanonicalIp::parse($ip) === $entry;
     }
 }

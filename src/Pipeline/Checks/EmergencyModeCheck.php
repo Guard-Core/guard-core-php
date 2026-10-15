@@ -39,19 +39,10 @@ final class EmergencyModeCheck extends SecurityCheck
 
         $clientIp = $request->state()->clientIp;
         if ($clientIp === null || $clientIp === '') {
-            $clientIp = ClientIpResolver::extract($request, $this->config);
+            $clientIp = ClientIpResolver::extract($request, $this->config, $this->logger);
         }
 
-        $parsed = CanonicalIp::parse($clientIp);
-        $isWhitelisted = false;
-        if ($parsed !== null) {
-            foreach ($this->config->emergencyWhitelist as $entry) {
-                if (self::matches($entry, $clientIp, $parsed)) {
-                    $isWhitelisted = true;
-                    break;
-                }
-            }
-        }
+        $isWhitelisted = CanonicalIp::ipInList($clientIp, $this->config->emergencyWhitelist);
 
         if (!$isWhitelisted) {
             $reason = "[EMERGENCY MODE] Access denied for IP {$clientIp}";
@@ -65,14 +56,5 @@ final class EmergencyModeCheck extends SecurityCheck
         }
 
         return null;
-    }
-
-    private static function matches(string $entry, string $ip, string $parsed): bool
-    {
-        if (str_contains($entry, '/')) {
-            return CanonicalIp::networkContains($entry, $parsed);
-        }
-
-        return $ip === $entry;
     }
 }
