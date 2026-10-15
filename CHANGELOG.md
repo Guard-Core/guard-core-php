@@ -1,5 +1,44 @@
 # Release Notes
 
+v4.4.0 (2026-10-15)
+-------------------
+
+Scan budget, client IP and IP list parity, dynamic rules over the base config, and a response modifier seam (v4.4.0)
+--------------------------------------------------------------------------------------------------------------------
+
+A release in lockstep with the core engines at 4.4.0. It adds the per-request scan time budget, brings the client identity and the IP list checks to the reference behavior, applies dynamic rules over the base config, and adds `GuardEngine::applyResponseModifier()` for adapters.
+
+### Added
+
+- **`detectionMaxScanSeconds`: a per-request cap on regex scan CPU time** (default `10.0`, range `0.1` to `60.0`, PR #80). Each pattern scan's CPU time (`getrusage()` user plus system time, so time spent descheduled is not charged) is summed per request and checked between patterns. Once it is spent the remaining patterns and values are skipped and the request records a weighted `pattern_timeout` threat (pattern `scan_time_budget_exhausted`), so padding a request cannot skip detection. A direct `detect()` call outside a request scan is not capped.
+- **`excludedSemanticDetectionHeaders`: an opt-in semantic-only header exclusion** (default empty, PR #78). Listed headers skip the semantic analyzer only and the regex scan still runs. It exists on `SecurityConfig` and on `RouteConfig` (merged with the global set, also reachable as `detectionExclusion(semanticHeaders: ...)`).
+- **`GuardEngine::applyResponseModifier()` and the `customResponseModifier` config field** (PR #84). The modifier is applied once, after the security headers and before the CORS headers, to every response the engine returns. `applyResponseModifier()` is the seam adapters call to modify the pass-through responses they send, and an exception inside the modifier leaves the response unmodified.
+- **`dynamicRuleInterval`** (default 300, minimum 60, PR #84): `execute()` calls the dynamic rule manager's interval gate, so the first request fetches and then one fetch runs per interval.
+- **Request metrics** (PR #78): `GuardEngine::processResponse` emits `response_time`, `request_count` and `error_rate` once an agent handler with `sendMetric` is attached and `agentEnableMetrics` is on.
+
+### Changed
+
+- **Behavior to know before upgrading.** `enableDynamicRules` and `enableEnrichment` now require `enableAgent`, like the reference `validate_agent_config`: a config that sets either without `enableAgent` no longer validates. The client identity, the IP list matching and the IP list precedence follow the reference (see Fixed), so a ban, a rate limit or a list entry can now match a client that it did not match before. A configured whitelist decides alone and the blacklist applies only when no whitelist is configured. An `ip_blacklist` dynamic rule is now a timed ban instead of a merge into the static list. A dynamic rule version no longer carries over the previous version's changes. A passive-mode suspicious log line without a trigger has new wording, so update any match on the old text.
+- `enableDynamicRules` now lists exactly what a rule changes.
+
+### Fixed
+
+- **Client identity resolution matches the reference** (PR #86, issue #85). `X-Forwarded-For` entries lose their port, empty entries are kept (which changes the entry the depth selects), and a depth that over-counts the proxy hops falls back to the right to left walk. Zoned addresses parse and a mapped zoned address renders as `::ffff:1.2.3.4%eth0`. A mapped peer inside an IPv4 CIDR in `trustedProxies` is no longer trusted and a malformed CIDR no longer stops the search. `trustedProxies` accepts the `unix` token, so a request with no peer address resolves through the chain. A forwarded header from an untrusted peer raises the `spoofing_detected` event and the spoof log once, with a redacted chain. List matching canonicalizes the entry (`CanonicalIp::ipInList`), so an IPv4 entry, an IPv4 CIDR, a mapped entry and a bracketed entry match a client that connects as IPv4-mapped IPv6.
+- **IP list precedence matches the reference** (PR #88, issue #87). The global stage runs the whitelist branch and consults the blacklist only when no whitelist is configured, a configured route whitelist skips the global lists for the request, and `checkRouteIpAccess` consults the route blacklist only when the route has no whitelist. The route country verdict still combines with the route IP verdict.
+- **Dynamic rules apply over the base config** (PR #84, issue #83). `ip_blacklist` bans through the engine ban manager for `ip_ban_duration` seconds and `ip_whitelist` unbans. `blocked_countries`, `whitelist_countries`, `block_cloud_providers`, `blocked_user_agents` and `endpoint_rate_limits` replace the base values. Each new version applies over the base config (guard-core #169): a failed apply keeps the previously active version, expiry restores the base, and patterns already in the pool are not added again. Emergency mode halves the auto-ban threshold in effect, once. The events match the reference envelopes, including `emergency_mode_activated`, and `SecurityConfig::with()` no longer drops `enableAgent`, `enableDynamicRules`, `agentEnableEvents`, `agentEnableMetrics` and `dynamicRulesCachePath`. `GuardEngine::initialize()` builds the `DynamicRuleManager` when `enableDynamicRules` is on and an agent handler with `getDynamicRules()` is attached.
+- **The Cookie header is scanned one `name=value` pair at a time** (PR #78, guard-core #162). The `;` between cookies no longer counts as a command separator in the semantic score, so an ordinary logged-in header is not rejected, while XSS, SQLi and CRLF inside a single cookie are still detected.
+- **Passive-mode suspicious logs keep the reason** (PR #78, guard-core #165). A passive line without a trigger reads `[PASSIVE MODE] Suspicious activity detected from <ip>: ... - Reason: <reason> - Headers: ...`.
+
+### Docs
+
+- The examples drop the stale `logSensitiveHeaders` address-header workaround, which skipped those headers from detection entirely (PR #82). `docs/configuration.md` and the agent docs describe the new options.
+
+### Chore
+
+- The sponsor button points at the maintainer's Sponsors page, the mkdocs `site_url` drops `/latest/`, and the README docs links point at the live site root (PR #76, #75, #73).
+
+___
+
 v4.3.3 (2026-10-12)
 -------------------
 
