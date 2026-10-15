@@ -48,6 +48,14 @@ final class RouteConfig
     /** @var list<string>|null */
     public readonly ?array $excludedDetectionHeaders;
 
+    /**
+     * Header names whose values skip the semantic analyzer only (regex
+     * scanning is unchanged); merges with the global set, never replaces it.
+     *
+     * @var list<string>|null
+     */
+    public readonly ?array $excludedSemanticDetectionHeaders;
+
     /** @var list<string>|null */
     public readonly ?array $excludedDetectionParams;
 
@@ -136,7 +144,8 @@ final class RouteConfig
         array $ipWhitelist = [],
         array $ipBlacklist = [],
         array $blockedCountries = [],
-        array $whitelistCountries = []
+        array $whitelistCountries = [],
+        ?array $excludedSemanticDetectionHeaders = null
     ) {
         $this->bypassedChecks = array_values(array_filter(
             $bypassedChecks,
@@ -155,6 +164,7 @@ final class RouteConfig
         $this->behaviorRules = $rules;
         $this->enableSuspiciousDetection = $enableSuspiciousDetection;
         $this->excludedDetectionHeaders = self::stringListOrNull($excludedDetectionHeaders);
+        $this->excludedSemanticDetectionHeaders = self::stringListOrNull($excludedSemanticDetectionHeaders);
         $this->excludedDetectionParams = self::stringListOrNull($excludedDetectionParams);
         $this->excludedDetectionBodyFields = self::stringListOrNull($excludedDetectionBodyFields);
         $this->enabledDetectionCategories = self::stringListOrNull($enabledDetectionCategories);
@@ -293,6 +303,7 @@ final class RouteConfig
             'ipBlacklist' => $this->ipBlacklist,
             'blockedCountries' => $this->blockedCountries,
             'whitelistCountries' => $this->whitelistCountries,
+            'excludedSemanticDetectionHeaders' => $this->excludedSemanticDetectionHeaders,
         ];
         foreach ($values as $name => $value) {
             if (!array_key_exists($name, $known)) {

@@ -9,6 +9,7 @@ use RenzoFranceschini\GuardCore\Pipeline\Checks\SuspiciousActivityCheck;
 use RenzoFranceschini\GuardCore\Request\GuardResponse;
 use RenzoFranceschini\GuardCore\Request\GuardResponseFactory;
 use RenzoFranceschini\GuardCore\Request\SimpleGuardRequest;
+use RenzoFranceschini\GuardCore\Routing\RouteConfig;
 use RenzoFranceschini\GuardCore\Routing\RouteResolver;
 
 require __DIR__ . '/../vendor/autoload.php';
@@ -168,6 +169,46 @@ $t->same(['x-late'], array_keys($mutated->excludedDetectionHeaders), 'with() car
 $t->section('empty exclusion config keeps current behavior');
 $t->same(true, blockedHeaders(makeCheck(), ['x-plain-header' => SCRIPT]), 'header attack blocks with no exclusions');
 $t->same(false, blockedHeaders(makeCheck(), ['user-agent' => 'Mozilla/5.0', 'accept' => 'application/json']), 'benign proxy identity values do not block');
+
+$t->section('opt-in semantic-only header exclusion (excluded_semantic_detection_headers)');
+// A detection threshold of 0.1 makes the benign value below a semantic-only
+// hit (no regex pattern matches it), the shape of a session cookie scoring
+// near the production threshold.
+const SEMANTIC_ONLY = 'theme=system';
+
+/** @param array<string, string> $headers */
+function blockedHeadersWithRoute(SuspiciousActivityCheck $check, array $headers, ?RouteConfig $route): bool
+{
+    $request = new SimpleGuardRequest(urlPath: '/items', method: 'POST', headers: $headers);
+    $request->state()->clientIp = '9.9.9.9';
+    $request->state()->routeConfig = $route;
+
+    return $check->check($request) instanceof GuardResponse;
+}
+
+$lowThreshold = new SecurityConfig(detectionSemanticThreshold: 0.1);
+$t->same([], array_keys($lowThreshold->excludedSemanticDetectionHeaders), 'excludedSemanticDetectionHeaders defaults empty');
+$t->same(true, blockedHeaders(makeCheck($lowThreshold), ['x-session' => SEMANTIC_ONLY]), 'with no opt-in a semantic-only header value blocks');
+
+$semanticExcluded = new SecurityConfig(detectionSemanticThreshold: 0.1, excludedSemanticDetectionHeaders: [' X-Session ']);
+$t->same(false, blockedHeaders(makeCheck($semanticExcluded), ['x-session' => SEMANTIC_ONLY]), 'a semantic-excluded header (any case, trimmed) skips the semantic analyzer');
+$t->same(true, blockedHeaders(makeCheck($semanticExcluded), ['x-other' => SEMANTIC_ONLY]), 'headers outside the set keep the semantic analyzer');
+$t->same(true, blockedHeaders(makeCheck($semanticExcluded), ['x-session' => SCRIPT]), 'regex scanning of a semantic-excluded header is unchanged (xss)');
+$t->same(true, blockedHeaders(makeCheck($semanticExcluded), ['x-session' => JNDI]), 'regex scanning of a semantic-excluded header is unchanged (jndi)');
+
+$routeSet = new RouteConfig(excludedSemanticDetectionHeaders: ['X-Route']);
+$t->same(false, blockedHeadersWithRoute(makeCheck($lowThreshold), ['x-route' => SEMANTIC_ONLY], $routeSet), 'a route-level semantic exclusion skips the semantic analyzer');
+$t->same(true, blockedHeadersWithRoute(makeCheck($lowThreshold), ['x-route' => SEMANTIC_ONLY], null), 'without the route set the same header blocks');
+$t->same(true, blockedHeadersWithRoute(makeCheck($lowThreshold), ['x-route' => SCRIPT], $routeSet), 'a route-level semantic exclusion keeps the regex scan');
+$mergedGlobal = new SecurityConfig(detectionSemanticThreshold: 0.1, excludedSemanticDetectionHeaders: ['x-global']);
+$t->same(false, blockedHeadersWithRoute(makeCheck($mergedGlobal), ['x-global' => SEMANTIC_ONLY], $routeSet), 'the route set merges with the global set (global entry)');
+$t->same(false, blockedHeadersWithRoute(makeCheck($mergedGlobal), ['x-route' => SEMANTIC_ONLY], $routeSet), 'the route set merges with the global set (route entry)');
+$t->same(null, (new RouteConfig())->excludedSemanticDetectionHeaders, 'RouteConfig semantic exclusion defaults null');
+
+$base = new SecurityConfig();
+$mutated = $base->with(['excluded_semantic_detection_headers' => ['x-late']]);
+$t->same([], array_keys($base->excludedSemanticDetectionHeaders), 'with() leaves the original semantic set untouched');
+$t->same(['x-late'], array_keys($mutated->excludedSemanticDetectionHeaders), 'with() carries the new semantic exclusion');
 
 echo "\npassed={$t->passed} failed={$t->failed}\n";
 exit($t->failed === 0 ? 0 : 1);

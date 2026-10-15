@@ -68,6 +68,8 @@ statically-built pipeline schedules the check from the global flag; the
 route-aware scheduling gate lives at the `CheckFactory` level (see
 KNOWN_GAPS).
 
+`excludedSemanticDetectionHeaders` (global `SecurityConfig` field, default empty, and a `RouteConfig` field that merges with it) is an opt-in list of header names whose values skip the semantic analyzer only: the regex passes still scan them. Names match case-insensitively and trimmed. Use it for values such as JWT session cookies that score near the semantic threshold. The decorator form is `detectionExclusion(semanticHeaders: [...])`.
+
 ## Behavior rules
 
 | Argument | Default | Notes |

@@ -98,7 +98,12 @@ final class SuspiciousActivityCheck extends SecurityCheck
 
         $categories = [];
         $triggerInfo = '';
-        foreach ($this->scanValues($request) as [$content, $context, $forcedCategory, $skipCategories, $label]) {
+        foreach ($this->scanValues($request) as $entry) {
+            [$content, $context, $forcedCategory, $skipCategories, $label] = $entry;
+            // The optional sixth element marks a value from a header listed in
+            // excluded_semantic_detection_headers: it skips the semantic
+            // analyzer only, the regex passes still scan it.
+            $skipSemantic = $entry[5] ?? false;
             // An unlabeled value is the whole-body blob: the reference
             // _scan_blob_body composes "Request body: {trigger}".
             $prefix = $label !== '' ? $label : 'Request body: ';
@@ -115,7 +120,7 @@ final class SuspiciousActivityCheck extends SecurityCheck
                 }
                 continue;
             }
-            $result = $this->susPatterns->detect($content, $clientIp, $context);
+            $result = $this->susPatterns->detect($content, $clientIp, $context, $skipSemantic);
             if ($result['is_threat']) {
                 foreach ($result['threats'] as $threat) {
                     $category = $threat['category'] ?? 'custom';
@@ -225,7 +230,9 @@ final class SuspiciousActivityCheck extends SecurityCheck
      * label], the label being the reference trigger prefix ("Request body:
      * ", "Header 'x': ", ...) the DetectionResult.trigger_info reports.
      *
-     * @return list<array{string, string, ?string, array<string, true>, string}>
+     * An entry from a semantic-excluded header carries a sixth element, true.
+     *
+     * @return list<array{0: string, 1: string, 2: ?string, 3: array<string, true>, 4: string, 5?: bool}>
      */
     /**
      * Mirrors _resolve_enabled_categories: a non-null route category set
@@ -260,6 +267,12 @@ final class SuspiciousActivityCheck extends SecurityCheck
             $this->config->excludedDetectionHeaders,
             array_fill_keys($routeExcludedHeaders, true)
         ));
+        // The semantic-only header opt-out merges global and route sets, each
+        // entry trimmed and lowercased (_resolve_semantic_excluded_headers).
+        $semanticHeaders = [];
+        foreach (array_merge(array_keys($this->config->excludedSemanticDetectionHeaders), $routeConfig?->excludedSemanticDetectionHeaders ?? []) as $semanticName) {
+            $semanticHeaders[strtolower(trim((string) $semanticName))] = true;
+        }
         $enabledCategories = $this->resolveEnabledCategories($routeConfig);
         $scanBody = $routeConfig?->detectionScanBody ?? $this->config->detectionScanBody;
         foreach ($request->queryParams() as $name => $value) {
@@ -280,7 +293,8 @@ final class SuspiciousActivityCheck extends SecurityCheck
             $skipCategories = isset($excludedHeaders[strtolower((string) $name)])
                 ? HeaderExclusions::skipCategories((string) $name, (string) $value)
                 : [];
-            foreach ($this->scannedValue((string) $value, 'header', "Header '" . strtolower((string) $name) . "': ", $excludedBodyFields, $skipCategories) as $entry) {
+            $skipSemantic = isset($semanticHeaders[strtolower(trim((string) $name))]);
+            foreach ($this->scannedValue((string) $value, 'header', "Header '" . strtolower((string) $name) . "': ", $excludedBodyFields, $skipCategories, $skipSemantic) as $entry) {
                 $values[] = $entry;
             }
         }
@@ -306,21 +320,35 @@ final class SuspiciousActivityCheck extends SecurityCheck
      *
      * @param array<string, true> $excludedBodyFields
      * @param array<string, true> $skipCategories
-     * @return list<array{string, string, null, array<string, true>}>
+     * @return list<array{0: string, 1: string, 2: ?string, 3: array<string, true>, 4: string, 5?: bool}>
      */
-    private function scannedValue(string $value, string $context, string $label, array $excludedBodyFields = [], array $skipCategories = []): array
+    private function scannedValue(string $value, string $context, string $label, array $excludedBodyFields = [], array $skipCategories = [], bool $skipSemantic = false): array
     {
         $root = JsonWalk::parse($value);
         if ($root === null) {
-            return [[$value, $context, null, $skipCategories, $label]];
+            return [self::scanEntry($value, $context, null, $skipCategories, $label, $skipSemantic)];
         }
         $entries = JsonWalk::walkEntries($root, $context . JsonWalk::EMBEDDED_JSON_LEAF_CONTEXT_SUFFIX, $excludedBodyFields);
         foreach ($entries as $i => [$leaf, $leafContext, $leafForced, $leafLabel]) {
-            $entries[$i] = [$leaf, $leafContext, $leafForced, $skipCategories, $leafLabel];
+            $entries[$i] = self::scanEntry($leaf, $leafContext, $leafForced, $skipCategories, $leafLabel, $skipSemantic);
         }
-        $entries[] = [$value, $context, null, $skipCategories, $label];
+        $entries[] = self::scanEntry($value, $context, null, $skipCategories, $label, $skipSemantic);
 
         return $entries;
+    }
+
+    /**
+     * @param array<string, true> $skipCategories
+     * @return array{0: string, 1: string, 2: ?string, 3: array<string, true>, 4: string, 5?: bool}
+     */
+    private static function scanEntry(string $content, string $context, ?string $forcedCategory, array $skipCategories, string $label, bool $skipSemantic): array
+    {
+        $entry = [$content, $context, $forcedCategory, $skipCategories, $label];
+        if ($skipSemantic) {
+            $entry[] = true;
+        }
+
+        return $entry;
     }
 
     /**
