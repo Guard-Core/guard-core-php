@@ -79,14 +79,15 @@ final class LogActivity
             $details = 'Request from ' . $context['client_ip'] . ': ' . $context['method'] . ' ' . $context['url'];
             $reasonMessage = 'Headers: ' . self::headersSegment($context['headers']);
         } elseif ($logType === 'suspicious') {
-            $lead = $passiveMode ? '[PASSIVE MODE] Penetration attempt detected from' : 'Suspicious activity detected from';
+            // Without a trigger (for example a passive rate-limit hit) the line
+            // is not a penetration attempt: it names itself suspicious activity
+            // and keeps the reason (guard-core #165).
+            $lead = $passiveMode && $triggerInfo !== ''
+                ? '[PASSIVE MODE] Penetration attempt detected from'
+                : ($passiveMode ? '[PASSIVE MODE] Suspicious activity detected from' : 'Suspicious activity detected from');
             $details = $lead . ' ' . $context['client_ip'] . ': ' . $context['method'] . ' ' . $context['url'];
-            if ($passiveMode) {
-                $reasonMessage = 'Headers: ' . self::headersSegment($context['headers']);
-                $triggerMessage = $triggerInfo !== '' ? 'Trigger: ' . $triggerInfo : '';
-                if ($triggerMessage !== '') {
-                    $reasonMessage = $triggerMessage . ' - ' . $reasonMessage;
-                }
+            if ($passiveMode && $triggerInfo !== '') {
+                $reasonMessage = 'Trigger: ' . $triggerInfo . ' - Headers: ' . self::headersSegment($context['headers']);
             } else {
                 $reasonMessage = 'Reason: ' . $reason . ' - Headers: ' . self::headersSegment($context['headers']);
             }
