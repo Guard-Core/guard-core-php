@@ -336,6 +336,7 @@ final class SecurityConfig
      * @param list<string> $logSensitiveParams
      * @param list<string> $logSensitiveBodyFields
      * @param (\Closure(object, array<string, mixed>): void)|null $onBlock
+     * @param bool|null $enableDynamicRules default false; lets the dashboard change protection at runtime without a code change, and needs an agent handler to deliver the rules: a rule adds the IPs in its ip_blacklist to the blacklist and the IPs in its ip_whitelist to the whitelist (ip_ban_duration is parsed but not applied, these are not timed bans), adds its suspicious_patterns to detection, appends to block_cloud_providers and blocked_user_agents, merges endpoint_rate_limits, and replaces blocked_countries, whitelist_countries, rate_limit, rate_limit_window, enable_penetration_detection, enable_ip_banning, enable_rate_limiting, enable_rate_limit_auto_ban, auto_ban_threshold, auto_ban_duration, emergency_mode and emergency_whitelist (emergency_mode also halves the auto-ban threshold); a rule cannot change any other setting
      * @param list<string> $emergencyWhitelist
      * @param array<int, string> $customErrorResponses per-status-code body overrides
      * @param list<string> $blockedUserAgents regex patterns, subject truncated to 512 chars

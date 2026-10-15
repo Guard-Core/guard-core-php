@@ -473,5 +473,17 @@ $standaloneFactory = new CheckFactory(
 $standaloneChecks = $standaloneFactory->buildChecks(new SecurityConfig(detectionPatternValidationCachePath: $tmpPath, blockCloudProviders: ['AWS']));
 $t->truthy($standaloneChecks !== [], 'a standalone CheckFactory builds the cache for its fallback detection engine');
 
+// enable_dynamic_rules documents exactly what a rule changes (guard-core #165).
+$ctorDoc = (string) (new ReflectionMethod(SecurityConfig::class, '__construct'))->getDocComment();
+$dynamicDoc = '';
+if (preg_match('/@param bool\|null \$enableDynamicRules(.*?)(?=\n\s*\* @param|\n\s*\*\/)/s', $ctorDoc, $m)) {
+    $dynamicDoc = $m[1];
+}
+$t->truthy($dynamicDoc !== '', 'enableDynamicRules has a @param doc line');
+foreach (['ip_blacklist', 'ip_whitelist', 'suspicious_patterns', 'blocked_countries', 'whitelist_countries', 'rate_limit', 'rate_limit_window', 'endpoint_rate_limits', 'block_cloud_providers', 'blocked_user_agents', 'enable_penetration_detection', 'enable_ip_banning', 'enable_rate_limiting', 'enable_rate_limit_auto_ban', 'auto_ban_threshold', 'auto_ban_duration', 'emergency_mode', 'emergency_whitelist'] as $ruleField) {
+    $t->truthy(str_contains($dynamicDoc, $ruleField), "enableDynamicRules doc lists {$ruleField}");
+}
+$t->truthy(str_contains($dynamicDoc, 'cannot change any other setting'), 'enableDynamicRules doc states the closed set');
+
 $t->same(0, $t->failed, 'no failures above');
 exit($t->finish('config fields'));
