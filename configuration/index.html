@@ -360,6 +360,17 @@
     <ul class="md-nav__list" data-md-component="toc" data-md-scrollfix>
       
         <li class="md-nav__item">
+  <a href="#dynamic-rules" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Dynamic rules
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
   <a href="#cors" class="md-nav__link">
     <span class="md-ellipsis">
       
@@ -554,6 +565,17 @@
     <ul class="md-nav__list" data-md-component="toc" data-md-scrollfix>
       
         <li class="md-nav__item">
+  <a href="#dynamic-rules" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Dynamic rules
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
   <a href="#cors" class="md-nav__link">
     <span class="md-ellipsis">
       
@@ -737,8 +759,24 @@
 <p><code>SecurityConfig</code> is built through a single constructor of named arguments
 (every field nullable with an engine default). Arguments belonging to features
 this port does not implement, when set to an enabling value, throw
-<code>UnsupportedFeatureError</code> (fail closed): guard agent telemetry, and dynamic
-rules.</p>
+<code>UnsupportedFeatureError</code> (fail closed).</p>
+<h2 id="dynamic-rules">Dynamic rules</h2>
+<table>
+<thead>
+<tr>
+<th>Argument</th>
+<th>Default</th>
+<th>Notes</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>enableDynamicRules</code></td>
+<td><code>false</code></td>
+<td>Lets the dashboard change protection at runtime without a code change. Needs an agent handler to deliver the rules. A rule adds the IPs in its <code>ip_blacklist</code> to the blacklist and the IPs in its <code>ip_whitelist</code> to the whitelist (<code>ip_ban_duration</code> is parsed but not applied, these are not timed bans), adds its <code>suspicious_patterns</code> to detection, appends to <code>block_cloud_providers</code> and <code>blocked_user_agents</code>, merges <code>endpoint_rate_limits</code>, and replaces <code>blocked_countries</code>, <code>whitelist_countries</code>, <code>rate_limit</code>, <code>rate_limit_window</code>, <code>enable_penetration_detection</code>, <code>enable_ip_banning</code>, <code>enable_rate_limiting</code>, <code>enable_rate_limit_auto_ban</code>, <code>auto_ban_threshold</code>, <code>auto_ban_duration</code>, <code>emergency_mode</code> and <code>emergency_whitelist</code>. <code>emergency_mode</code> also halves the auto-ban threshold. A rule cannot change any other setting.</td>
+</tr>
+</tbody>
+</table>
 <h2 id="cors">CORS</h2>
 <table>
 <thead>
@@ -838,6 +876,8 @@ URL path, query and headers still scan. Scheduling note: the engine's
 statically-built pipeline schedules the check from the global flag; the
 route-aware scheduling gate lives at the <code>CheckFactory</code> level (see
 KNOWN_GAPS).</p>
+<p><code>excludedSemanticDetectionHeaders</code> (global <code>SecurityConfig</code> field, default empty, and a <code>RouteConfig</code> field that merges with it) is an opt-in list of header names whose values skip the semantic analyzer only: the regex passes still scan them. Names match case-insensitively and trimmed. Use it for values such as JWT session cookies that score near the semantic threshold. The decorator form is <code>detectionExclusion(semanticHeaders: [...])</code>.</p>
+<p>The <code>Cookie</code> header is scanned one <code>name=value</code> pair at a time (split on <code>;</code>, only spaces trimmed so CR and LF stay, empty pairs skipped), each pair taking the same header path, so a session cookie no longer scores as one blob and the semantic opt-out applies to each pair.</p>
 <h2 id="behavior-rules">Behavior rules</h2>
 <table>
 <thead>
