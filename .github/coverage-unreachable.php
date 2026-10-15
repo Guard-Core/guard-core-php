@@ -248,14 +248,14 @@ return [
         85, 86, 88,
     ],
 
-    // The bare-string guards inside validateSensitiveSet (1105) and
-    // validateExclusionSet (1129) sit behind typed ?array constructor
+    // The bare-string guards inside validateSensitiveSet (1162) and
+    // validateExclusionSet (1186) sit behind typed ?array constructor
     // parameters: PHP raises the TypeError at the call boundary, so a
     // string can never reach the is_string($names) checks (the same shape
     // as the BehaviorRule entry above). The suites assert the boundary
     // TypeError instead (test_json_logging.php).
     'src/Config/SecurityConfig.php' => [
-        1120, 1144,
+        1162, 1186,
     ],
 
     // 219: the non-array/non-scalar json_decode guard - json_decode can
@@ -271,7 +271,7 @@ return [
         219, 240, 241, 242, 243,
     ],
 
-    // 518-522: the ip_ban-side initialization catch. Every collaborator
+    // 621-625: the ip_ban-side initialization catch. Every collaborator
     // inside the try fails open or swallows: RateLimitHandler::
     // initializeRedis wraps scriptLoad in its own catch, initializeIpBan
     // only assigns the manager, IpBanManager::initializeRedis migrates
@@ -279,6 +279,6 @@ return [
     // refreshes through the single-flight path that logs its own
     // failures - no input steers a Throwable out of the block.
     'src/Engine/GuardEngine.php' => [
-        518, 519, 520, 521, 522,
+        621, 622, 623, 624, 625,
     ],
 ];

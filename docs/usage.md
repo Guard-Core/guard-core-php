@@ -156,22 +156,51 @@ duck-typed `sendEvent(SecurityEvent)`) attaches via `setAgentHandler()`;
 adapters can also `drain()` the queue. Gating: `agent_enable_events`,
 `EventFilter` muted types. Send failures log and never raise.
 `MetricsCollector` mirrors this for `response_time` / `request_count` /
-`error_rate` under `agent_enable_metrics`. With a wired `RedisHandler`
-and no agent handler the collector persists the queue under
-`{prefix}metrics:pending` (a JSON list) so metrics survive across
-requests; attaching a handler or calling `drain()` flushes the backlog
-in order and clears the key. Redis failures log and never raise.
+`error_rate` under `agent_enable_metrics`. The engine builds its collector
+without a `RedisHandler`, so metrics are emitted only once an agent handler
+with `sendMetric` is attached and nothing is queued or persisted before that.
+A collector you construct yourself with a `RedisHandler` persists the queue
+under `{prefix}metrics:pending` (a JSON list) while no handler is attached;
+attaching a handler or calling `drain()` flushes the backlog in order and
+clears the key. Redis failures log and never raise.
 
-`DynamicRuleManager` ports the agent-synced dynamic rules: the update flow
-(expiry, staleness gate, updated/applied events), transactional
-application over the immutable config (`SecurityConfig::with()` builds the
-full validated candidate; on any failure the previous config stays
-installed - partial application never survives), last-known persistence
-(Redis `dynamic_rules:last_known` plus an optional atomic file copy), one
-shot hydration at startup, and the `match_event` correlation. With no
-readable store the manager keeps the base config (fail closed). Enable it
-with `enable_dynamic_rules` and hand the manager
-`$engine->applyDynamicConfig(...)` as its `applyConfig` seam.
+`DynamicRuleManager` ports the agent-synced dynamic rules. The engine builds
+and drives it from config: with `enableAgent` and `enableDynamicRules` set
+and an agent handler attached through `setAgentHandler()` (it must expose
+`getDynamicRules()`), `GuardEngine::initialize()` creates the manager,
+hydrates the last-known rules, and `execute()` fetches new rules on the first
+request and then every `dynamicRuleInterval` seconds (default 300, minimum
+60). The reference runs a background loop for this; a PHP request process has
+no background task, so the interval is checked per request instead, with the
+same period (guard-agent-php drives its own rules refresh from `tick()` for
+the same reason). Without an agent handler the engine warns and stays on the
+static config. Under PHP-FPM each worker keeps its own interval clock, and
+the last-known snapshot (Redis `dynamic_rules:last_known` or the cache file)
+is what a fresh worker hydrates from.
+
+A rule is applied exactly as the reference does: `ip_blacklist` IPs are
+banned for `ip_ban_duration` seconds and `ip_whitelist` IPs are unbanned
+(through the engine's ban manager, not the static lists), `suspicious_patterns`
+join detection unless already present, and `blocked_countries`,
+`whitelist_countries`, `blocked_cloud_providers` (unknown providers dropped),
+`blocked_user_agents` (ReDoS-validated), `endpoint_rate_limits`, the global
+rate limit, the feature toggles and the emergency pair REPLACE the matching
+config values. Country rules need a geo resolver, else they are skipped with
+a warning. Emergency mode halves the auto-ban threshold in effect.
+
+Each new rule version is applied over the base config (the config before the
+first active rule), never over the previous version, so halving and list
+changes never compound. A failed application keeps the previously installed
+config and re-throws, expiry restores the base, and the last-known snapshot
+(Redis plus an optional atomic file copy) is hydrated once at startup. The
+manager also exposes the `match_event` correlation. Rules arrive as the
+agent's own `DynamicRules` object, an array or the core `DynamicRules` model.
+
+`customResponseModifier` is applied once to every response the engine
+returns (blocks, redirects, failures), after the security headers and before
+the CORS verdict headers; adapters call `GuardEngine::applyResponseModifier()`
+for the pass-through responses they send. An exception leaves the response
+unmodified.
 
 ## Conformance
 

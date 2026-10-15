@@ -6,8 +6,13 @@ namespace RenzoFranceschini\GuardCore\Request;
 
 final class GuardResponseFactory
 {
+    /** @var \WeakMap<object, true> responses a modifier pass already produced */
+    private \WeakMap $modified;
+
+    /** @param (\Closure(mixed): mixed)|null $responseModifier the reference custom_response_modifier */
     public function __construct(private readonly ?\Closure $responseModifier = null)
     {
+        $this->modified = new \WeakMap();
     }
 
     /**
@@ -35,15 +40,44 @@ final class GuardResponseFactory
         return new GuardResponse($statusCode, $headers, null);
     }
 
+    /**
+     * The reference apply_modifier: the modifier's result replaces the
+     * response; an exception is logged and the unmodified response returned.
+     */
     public function applyModifier(mixed $response): mixed
     {
         if ($this->responseModifier === null) {
             return $response;
         }
         try {
-            return ($this->responseModifier)($response);
-        } catch (\Throwable) {
+            $result = ($this->responseModifier)($response);
+        } catch (\Throwable $e) {
+            error_log('[guard_core] custom_response_modifier raised ' . $e::class . ': ' . $e->getMessage()
+                . '; returning unmodified response');
+
             return $response;
         }
+        if (is_object($result)) {
+            $this->modified[$result] = true;
+        }
+
+        return $result;
+    }
+
+    /**
+     * The engine's single modifier pass over a response it returns: a
+     * response a check already modified (the custom request check applies
+     * the modifier itself, as the reference does) is not modified twice, and
+     * a modifier that returns anything but a GuardResponse is treated as
+     * failed, keeping the original.
+     */
+    public function applyModifierOnce(GuardResponse $response): GuardResponse
+    {
+        if ($this->responseModifier === null || isset($this->modified[$response])) {
+            return $response;
+        }
+        $result = $this->applyModifier($response);
+
+        return $result instanceof GuardResponse ? $result : $response;
     }
 }

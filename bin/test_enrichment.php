@@ -316,7 +316,7 @@ $engineConfig = new SecurityConfig(blacklist: ['203.0.113.99']);
 $engine = new GuardEngine($engineConfig);
 $sink = new CaptureSink();
 $composite = AgentHandlerComposer::compose(
-    new SecurityConfig(enableEnrichment: true, otelServiceName: 'edge-svc'),
+    new SecurityConfig(enableAgent: true, enableEnrichment: true, otelServiceName: 'edge-svc'),
     agentHandler: $sink,
     behaviorTracker: new TrackerFake(3),
     clock: static fn (): float => 5_000.0
@@ -356,7 +356,7 @@ $t->section('composer wiring');
 $compositeOnlyAgent = AgentHandlerComposer::compose(new SecurityConfig(), agentHandler: $sink);
 $t->truthy($compositeOnlyAgent instanceof CompositeAgentHandler, 'composer returns a composite');
 $full = AgentHandlerComposer::compose(
-    new SecurityConfig(enableEnrichment: true, enableOtel: true, enableLogfire: true),
+    new SecurityConfig(enableAgent: true, enableEnrichment: true, enableOtel: true, enableLogfire: true),
     agentHandler: $sink,
     logfireClient: new class {
         public function configured(): bool

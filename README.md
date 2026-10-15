@@ -137,6 +137,7 @@ ___
 - **IP lists**: whitelist, blacklist, and exemptions with CIDR support
 - **Geo rate limits and country blocking**: per-country rules via GeoIP
 - **CORS handling and security headers**: OWASP-aligned defaults
+- **Agent-synced dynamic rules** and a custom response modifier, applied exactly as the reference engine does
 - **Behavior rules**: per-route usage counting and bans
 - **Per-route detection exclusions** and detection limits (ReDoS-safe custom patterns)
 - **Redis-backed distributed state** with fail-open / fail-secure modes

@@ -78,10 +78,9 @@ Inline comments in `index.php` walk through every knob used:
 - `excludePaths` for health and docs routes
 - Redis via `REDIS_HOST` / `REDIS_PORT` / `REDIS_PREFIX` (compose wires Redis
   in; without it the managers fall back to in-process state)
-- The `onBlock` hook: the telemetry seam for wiring
-  [guard-agent-php](https://github.com/Guard-Core/guard-agent-php) (comment-level
-  guidance in `index.php`; agent integration is not implemented in the engine
-  port yet, and `enableAgent` fails config validation)
+- The `onBlock` hook: the in-process hook for block events; for telemetry
+  attach [guard-agent-php](https://github.com/Guard-Core/guard-agent-php) with
+  `setAgentHandler()` and set `enableAgent: true` (guidance in `index.php`)
 
 ## Environment variables
 

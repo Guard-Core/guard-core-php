@@ -262,7 +262,7 @@ final class RedisInteropRunner
             'dynamic_rules' => function (array $case): void {
                 $args = $case['operation']['args'];
                 $manager = new DynamicRuleManager(
-                    config: new SecurityConfig(enableDynamicRules: true),
+                    config: new SecurityConfig(enableAgent: true, enableDynamicRules: true),
                     agentHandler: new class($args['rules']) {
                         /** @param array<string, mixed> $rules */
                         public function __construct(private array $rules)

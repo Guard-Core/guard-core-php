@@ -611,7 +611,7 @@ $handlers = $prop->getValue($plain);
 $t->same(1, count($handlers), 'no flags: only the agent handler');
 
 $everything = AgentHandlerComposer::compose(
-    new SecurityConfig(enableOtel: true, enableLogfire: true, enableEnrichment: true, agentProjectId: 'p'),
+    new SecurityConfig(enableOtel: true, enableLogfire: true, enableAgent: true, enableEnrichment: true, agentProjectId: 'p'),
     agentHandler: new Sink('agent'),
     logfireClient: new LogfireFake()
 );
