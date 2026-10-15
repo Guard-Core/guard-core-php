@@ -313,7 +313,7 @@ $t->same('', $redisGate->getKey('patterns', 'custom'), 'the removal persisted to
 // 10. Dynamic rule application
 // ---------------------------------------------------------------------
 $t->section('dynamic rule application');
-$ruleConfig = new SecurityConfig(enableDynamicRules: true);
+$ruleConfig = new SecurityConfig(enableAgent: true, enableDynamicRules: true);
 $ruleAgent = new RegAgent();
 $ruleLogs = [];
 $ruleRegistry = new SusPatterns(0.99, eventBus: new EventBus($ruleAgent, $ruleConfig));
@@ -355,7 +355,7 @@ $t->truthy($result['is_threat'], 'the dynamic-rule pattern feeds the detection e
 
 $noRegistryLogs = [];
 $noRegistry = new DynamicRuleManager(
-    config: new SecurityConfig(enableDynamicRules: true),
+    config: new SecurityConfig(enableAgent: true, enableDynamicRules: true),
     agentHandler: $payloadAgent,
     logger: static function (string $level, string $message) use (&$noRegistryLogs): void {
         $noRegistryLogs[] = $level . ': ' . $message;

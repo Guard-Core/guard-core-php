@@ -4,6 +4,8 @@ declare(strict_types=1);
 
 namespace RenzoFranceschini\GuardCore\Rules;
 
+use RenzoFranceschini\GuardCore\Ban\IpBanManager;
+use RenzoFranceschini\GuardCore\Cloud\CloudProviderRegistry;
 use RenzoFranceschini\GuardCore\Config\SecurityConfig;
 use RenzoFranceschini\GuardCore\Detection\Redos\Prefilters;
 use RenzoFranceschini\GuardCore\Detection\Redos\ValidationCache;
@@ -16,18 +18,30 @@ use RenzoFranceschini\GuardCore\Redis\RedisHandler;
  * The dynamic rule manager, ported from the reference
  * dynamic_rule_handler.py plus its application and snapshot mixins (spec
  * 12 "Dynamic rules"): the update flow (expiry, staleness gate,
- * already-expired rejection, updated/applied events), the transactional
- * application (config snapshot before, restore on any exception - partial
- * application MUST NOT survive), the last-known persistence (Redis
+ * already-expired rejection, updated/applied events), the application of
+ * every rule field exactly as _dynamic_rule_application.py does (timed bans
+ * for ip_blacklist, unbans for ip_whitelist, replace semantics for the
+ * country, cloud, user-agent and endpoint rate limit lists, the emergency
+ * halving), the overlay (guard-core #169: every new rule version is applied
+ * over the BASE config, never over the previous version, so changes do not
+ * compound or accumulate), the last-known persistence (Redis
  * `dynamic_rules:last_known`, no TTL, plus an optional atomic file copy)
  * and the hydration, and match_event.
  *
- * Application surface: the reference mutates a mutable config; the PHP
- * config is immutable, so the manager builds the candidate config with
- * SecurityConfig::with() (full validation runs there) and hands it to the
- * $applyConfig callable only after the candidate constructed cleanly -
- * when validation or application throws, the previous config stays
- * installed and the exception propagates (fail closed).
+ * Application surface: the reference mutates a mutable config and keeps a
+ * deep-copied base snapshot; the PHP config is immutable, so the manager
+ * builds the candidate config with SecurityConfig::with() on the base (full
+ * validation runs there) and hands it to the $applyConfig callable. The
+ * base is the config as it was before the first active rule
+ * (activeBaseSnapshot); a failed application leaves the previously
+ * installed config in place (the previous version, or the base) and
+ * re-throws, expiry installs the base again.
+ *
+ * Update schedule: the reference runs a background loop calling
+ * update_rules every dynamic_rule_interval seconds, first at agent init.
+ * PHP request processes have no background task, so maybeUpdate() is the
+ * equivalent: called per request, it runs updateRules() when the interval
+ * has elapsed (and on the first call), with the same period.
  *
  * Redis fail-closed: the last-known store is Redis first, then the
  * optional file; when neither store is readable the manager refuses to
@@ -41,21 +55,36 @@ final class DynamicRuleManager
 
     public const LAST_KNOWN_RULES_KEY = 'last_known';
 
+    /** The reference _MAX_USER_AGENT_MATCH_LENGTH used by the user-agent rule validator. */
+    private const MAX_USER_AGENT_MATCH_LENGTH = 512;
+
+    private const HANDLER_NAME = 'dynamic_rules';
+
     private ?DynamicRules $currentRules = null;
 
     private float $lastUpdate = 0;
 
     private ?SecurityConfig $activeBaseSnapshot = null;
 
+    /** The config this manager last handed to $applyConfig (the live state). */
+    private SecurityConfig $installed;
+
+    /** Highest config revision installed so far; candidates always exceed it so the pipeline rebuilds. */
+    private int $maxRevision;
+
     private ?string $lastSkippedExpiredRule = null;
 
     private bool $hydratedLastKnownRules = false;
 
+    private ?int $nextPollAt = null;
+
     /** @var \Closure(): int */
     private \Closure $clock;
 
+    private ?ValidationCache $validationCache;
+
     /**
-     * @param object|null $agentHandler duck-typed getDynamicRules(): array|null
+     * @param object|null $agentHandler duck-typed getDynamicRules(): DynamicRules|array|object|null
      * @param (\Closure(SecurityConfig): void)|null $applyConfig installs a
      *        validated config (the engine swaps it and rebuilds the
      *        pipeline); null records the rules without installing
@@ -64,6 +93,11 @@ final class DynamicRuleManager
      *        _apply_pattern_rules over the singleton); null leaves the
      *        patterns unapplied with a warning
      * @param (\Closure(): int)|null $clock
+     * @param IpBanManager|null $banManager the engine's ban manager:
+     *        ip_blacklist rules ban through it for ip_ban_duration seconds,
+     *        ip_whitelist rules unban; null leaves the IP rules unapplied
+     *        with a warning
+     * @param (\Closure(string, string): void)|null $logger (level, message)
      */
     public function __construct(
         private readonly SecurityConfig $config,
@@ -73,9 +107,12 @@ final class DynamicRuleManager
         private readonly ?\Closure $applyConfig = null,
         private readonly ?\Closure $logger = null,
         ?\Closure $clock = null,
-        private readonly ?SusPatterns $susPatterns = null
+        private readonly ?SusPatterns $susPatterns = null,
+        private readonly ?IpBanManager $banManager = null
     ) {
         $this->clock = $clock ?? static fn (): int => time();
+        $this->installed = $config;
+        $this->maxRevision = $config->revision();
         // _apply_user_agent_rules builds its validator with the config's
         // disk-backed validation cache, so re-certifying user-agent
         // patterns across update passes reuses prior cost verdicts.
@@ -84,7 +121,18 @@ final class DynamicRuleManager
             : null;
     }
 
-    private ?ValidationCache $validationCache;
+    private function log(string $level, string $message): void
+    {
+        if ($this->logger !== null) {
+            ($this->logger)($level, $message);
+        }
+    }
+
+    /** Python list repr, for log lines that mirror the reference text. */
+    private static function pyList(array $items): string
+    {
+        return '[' . implode(', ', array_map(static fn (string $item): string => "'{$item}'", $items)) . ']';
+    }
 
     public function currentRules(): ?DynamicRules
     {
@@ -94,6 +142,33 @@ final class DynamicRuleManager
     public function lastUpdate(): float
     {
         return $this->lastUpdate;
+    }
+
+    /**
+     * The config as it was before the first active rule (the reference
+     * _active_base_snapshot); null while no rule is active.
+     */
+    public function activeBaseSnapshot(): ?SecurityConfig
+    {
+        return $this->activeBaseSnapshot;
+    }
+
+    /**
+     * The per-request stand-in for the reference update loop: runs one
+     * update pass on the first call and then whenever dynamic_rule_interval
+     * seconds have elapsed since the previous pass.
+     */
+    public function maybeUpdate(): void
+    {
+        if (!$this->config->dynamicRulesEnabled || $this->agentHandler === null) {
+            return;
+        }
+        $now = ($this->clock)();
+        if ($this->nextPollAt !== null && $now < $this->nextPollAt) {
+            return;
+        }
+        $this->nextPollAt = $now + $this->config->dynamicRuleInterval;
+        $this->updateRules();
     }
 
     /**
@@ -114,7 +189,12 @@ final class DynamicRuleManager
             if ($payload === null || $payload === []) {
                 return;
             }
-            $rules = $payload instanceof DynamicRules ? $payload : DynamicRules::fromArray($payload);
+            $rules = match (true) {
+                $payload instanceof DynamicRules => $payload,
+                is_array($payload) => DynamicRules::fromArray($payload),
+                is_object($payload) => DynamicRules::fromObject($payload),
+                default => throw new \InvalidArgumentException('the agent returned an unusable dynamic rules payload'),
+            };
 
             if ($this->rejectIfAlreadyExpired($rules)) {
                 return;
@@ -123,24 +203,48 @@ final class DynamicRuleManager
                 return;
             }
 
-            $this->sendRuleEvent(EventTypes::EVENT_DYNAMIC_RULE_UPDATED, $rules, 'rules_received');
-            ($this->logger)('info', 'Applying dynamic rules: ' . $rules->ruleId . ' v' . $rules->version);
+            $this->eventBus?->sendHandlerEvent(
+                EventTypes::EVENT_DYNAMIC_RULE_UPDATED,
+                self::HANDLER_NAME,
+                'system',
+                'rules_received',
+                "Received updated rules {$rules->ruleId} v{$rules->version}",
+                [
+                    'rule_id' => $rules->ruleId,
+                    'version' => $rules->version,
+                    'previous_version' => $this->currentRules?->version ?? 0,
+                ]
+            );
+            $this->log('info', 'Applying dynamic rules: ' . $rules->ruleId . ' v' . $rules->version);
             $this->applyRules($rules);
 
             $this->currentRules = $rules;
             $this->lastUpdate = (float) ($this->clock)();
 
-            $this->sendRuleEvent(EventTypes::EVENT_DYNAMIC_RULE_APPLIED, $rules, 'rules_updated');
+            $this->eventBus?->sendHandlerEvent(
+                EventTypes::EVENT_DYNAMIC_RULE_APPLIED,
+                self::HANDLER_NAME,
+                'system',
+                'rules_updated',
+                "Applied dynamic rules {$rules->ruleId} v{$rules->version}",
+                [
+                    'rule_id' => $rules->ruleId,
+                    'version' => $rules->version,
+                    'ip_bans' => count($rules->ipBlacklist),
+                    'country_blocks' => count($rules->blockedCountries),
+                    'emergency_mode' => $rules->emergencyMode,
+                ]
+            );
         } catch (\Throwable $e) {
-            ($this->logger)('error', 'Failed to update dynamic rules: ' . $e->getMessage());
+            $this->log('error', 'Failed to update dynamic rules: ' . $e->getMessage());
         }
     }
 
     /**
-     * Hydrates the last-known snapshot once before the update loop starts
-     * (Redis first, then the cache file); expired or unparseable payloads
-     * are skipped, and with no readable store the base config stays -
-     * stale rules are never resurrected.
+     * Hydrates the last-known snapshot once before the update schedule
+     * starts (Redis first, then the cache file); expired or unparseable
+     * payloads are skipped, and with no readable store the base config
+     * stays - stale rules are never resurrected.
      */
     public function hydrateLastKnownRules(): void
     {
@@ -156,10 +260,10 @@ final class DynamicRuleManager
             $this->applyRules($rules);
             $this->currentRules = $rules;
             $this->lastUpdate = (float) ($this->clock)();
-            ($this->logger)('info', 'Hydrated last-known dynamic rules ' . $rules->ruleId
+            $this->log('info', 'Hydrated last-known dynamic rules ' . $rules->ruleId
                 . ' v' . $rules->version . ' before the update loop started');
         } catch (\Throwable $e) {
-            ($this->logger)('error', 'Failed to hydrate last-known dynamic rules: ' . $e->getMessage());
+            $this->log('error', 'Failed to hydrate last-known dynamic rules: ' . $e->getMessage());
         }
     }
 
@@ -218,7 +322,7 @@ final class DynamicRuleManager
         }
         $this->currentRules = null;
         $this->activeBaseSnapshot = null;
-        ($this->logger)('info', 'Dynamic rule ' . $rules->ruleId . ' v' . $rules->version
+        $this->log('info', 'Dynamic rule ' . $rules->ruleId . ' v' . $rules->version
             . ' expired; restored base config');
     }
 
@@ -234,7 +338,7 @@ final class DynamicRuleManager
         $key = $rules->ruleId . '|' . $rules->version;
         if ($this->lastSkippedExpiredRule !== $key) {
             $this->lastSkippedExpiredRule = $key;
-            ($this->logger)('warning', 'Dynamic rule ' . $rules->ruleId . ' v' . $rules->version
+            $this->log('warning', 'Dynamic rule ' . $rules->ruleId . ' v' . $rules->version
                 . ' already expired on receipt; ignoring');
         }
 
@@ -242,163 +346,261 @@ final class DynamicRuleManager
     }
 
     /**
-     * The transactional application (_apply_rules): snapshot the live
-     * config, build the candidate (full validation), install, and on any
-     * failure restore the snapshot and re-throw - partial application
-     * never survives. The first successful rule's snapshot is retained as
-     * the active base so expiry restores pre-rule state across rules.
+     * The transactional application (_apply_rules): the candidate is built
+     * over the active base (the base config before the first active rule),
+     * never over the previously applied version. A failure before the
+     * install leaves the installed config untouched (the previous version,
+     * or the base) and re-throws; a failure of the install itself
+     * re-installs the previous config. The first successful application
+     * retains the base as the active base so expiry restores the pre-rule
+     * state across consecutive versions.
      */
     private function applyRules(DynamicRules $rules): void
     {
-        $snapshot = $this->config;
+        $previous = $this->installed;
+        $base = $this->activeBaseSnapshot ?? $this->installed;
+        $installAttempted = false;
         try {
-            $candidate = $this->buildCandidateConfig($snapshot, $rules);
+            $this->applyIpRules($rules);
+            $candidate = $this->buildCandidateConfig($base, $rules);
+            $installAttempted = true;
             $this->installConfig($candidate);
         } catch (\Throwable $e) {
-            try {
-                $this->installConfig($snapshot);
-            } catch (\Throwable $restoreError) {
-                ($this->logger)('error', 'Failed to restore the base config: ' . $restoreError->getMessage());
+            if ($installAttempted) {
+                try {
+                    $this->installConfig($previous);
+                } catch (\Throwable $restoreError) {
+                    $this->log('error', 'Failed to restore the previous config: ' . $restoreError->getMessage());
+                }
             }
-            ($this->logger)('error', 'Failed to apply dynamic rules: ' . $e->getMessage());
+            $this->log('error', 'Failed to apply dynamic rules: ' . $e->getMessage());
             throw $e;
         }
         if ($this->currentRules === null && $this->activeBaseSnapshot === null) {
-            $this->activeBaseSnapshot = $snapshot;
+            $this->activeBaseSnapshot = $base;
+        }
+        if ($rules->emergencyMode && $this->eventBus !== null) {
+            $this->eventBus->sendHandlerEvent(
+                EventTypes::EVENT_EMERGENCY_MODE,
+                self::HANDLER_NAME,
+                'system',
+                'emergency_lockdown',
+                '[EMERGENCY MODE] activated via dynamic rules',
+                [
+                    'whitelist_count' => count($rules->emergencyWhitelist),
+                    'whitelist' => array_slice($rules->emergencyWhitelist, 0, 10),
+                ]
+            );
         }
         $this->persistLastKnownRules($rules);
     }
 
+    /** _apply_ip_rules: ip_blacklist bans for ip_ban_duration, ip_whitelist unbans. */
+    private function applyIpRules(DynamicRules $rules): void
+    {
+        if ($rules->ipBlacklist === [] && $rules->ipWhitelist === []) {
+            return;
+        }
+        if ($this->banManager === null) {
+            $this->log('warning', 'Dynamic rule: ip_blacklist and ip_whitelist are skipped: no ban manager is attached to the dynamic rule manager');
+
+            return;
+        }
+        foreach ($rules->ipBlacklist as $ip) {
+            try {
+                if ($this->banManager->ban($ip, $rules->ipBanDuration, 'dynamic_rule')) {
+                    $this->log('info', "Dynamic rule: Banned IP {$ip} for {$rules->ipBanDuration}s");
+                }
+            } catch (\Throwable $e) {
+                $this->log('error', "Failed to ban IP {$ip}: {$e->getMessage()}");
+            }
+        }
+        foreach ($rules->ipWhitelist as $ip) {
+            try {
+                $this->banManager->unban($ip);
+                $this->log('info', "Dynamic rule: Whitelisted IP {$ip}");
+            } catch (\Throwable $e) {
+                $this->log('error', "Failed to whitelist IP {$ip}: {$e->getMessage()}");
+            }
+        }
+    }
+
     /**
-     * The field application (_apply_rules order): ip rules, blocking
-     * rules, rate limits, feature toggles, emergency mode. Unknown cloud
-     * providers and unvalidatable user-agent patterns are warned and
-     * dropped; suspicious patterns register through the engine's runtime
-     * pattern registry (warned and skipped only when no registry is
-     * attached).
+     * The config fields a rule changes (_apply_blocking_rules,
+     * _apply_rate_limit_rules, _apply_feature_toggles and
+     * _activate_emergency_mode, in that order), as with() values over the
+     * base. Country rules are skipped with a warning when no resolver is
+     * configured; unknown cloud providers and unvalidatable user-agent
+     * patterns are warned and dropped, and the surviving lists REPLACE the
+     * base values (an all-invalid list empties them, as in the reference);
+     * suspicious patterns register through the engine's runtime pattern
+     * registry (those already in the pool are not added again).
      *
      * @return array<string, mixed> the with() values
      */
-    private function ruleFields(DynamicRules $rules): array
+    private function ruleFields(SecurityConfig $base, DynamicRules $rules): array
     {
         $fields = [];
-        if ($rules->ipBlacklist !== []) {
-            $fields['blacklist'] = array_values(array_unique(array_merge($this->config->blacklist, $rules->ipBlacklist)));
-        }
-        if ($rules->ipWhitelist !== []) {
-            $fields['whitelist'] = array_values(array_unique(array_merge($this->config->whitelist ?? [], $rules->ipWhitelist)));
-        }
-        if ($rules->blockedCountries !== []) {
-            $fields['blocked_countries'] = $rules->blockedCountries;
-        }
-        if ($rules->whitelistCountries !== []) {
-            $fields['whitelist_countries'] = $rules->whitelistCountries;
+        if ($rules->blockedCountries !== [] || $rules->whitelistCountries !== []) {
+            if ($base->geoIpHandler === null && $base->geoIpDbPath === '') {
+                $this->log('warning', 'Dynamic rule: country rules cannot take effect (blocked='
+                    . self::pyList($rules->blockedCountries) . ', allowed=' . self::pyList($rules->whitelistCountries)
+                    . '); no geo_ip_handler or geo_ip_db_path is configured to resolve IPs to countries');
+            } else {
+                if ($rules->blockedCountries !== []) {
+                    $blocked = array_values(array_unique(array_map(strtoupper(...), $rules->blockedCountries)));
+                    $fields['blocked_countries'] = $blocked;
+                    $sorted = $blocked;
+                    sort($sorted);
+                    $this->log('info', 'Dynamic rule: Blocked countries ' . self::pyList($sorted));
+                }
+                if ($rules->whitelistCountries !== []) {
+                    $allowed = array_values(array_unique(array_map(strtoupper(...), $rules->whitelistCountries)));
+                    $fields['whitelist_countries'] = $allowed;
+                    $sorted = $allowed;
+                    sort($sorted);
+                    $this->log('info', 'Dynamic rule: Whitelisted countries ' . self::pyList($sorted));
+                }
+            }
         }
         if ($rules->blockedCloudProviders !== []) {
-            $selectors = [];
+            $valid = [];
+            $invalid = [];
             foreach ($rules->blockedCloudProviders as $provider) {
-                if (in_array($provider, $this->config->blockCloudProviders, true)) {
-                    continue;
+                $bare = explode(':!', $provider, 2)[0];
+                if (in_array($bare, CloudProviderRegistry::PROVIDERS, true)) {
+                    $valid[] = $provider;
+                } else {
+                    $invalid[] = $provider;
                 }
-                $selectors[] = $provider;
             }
-            $fields['block_cloud_providers'] = array_values(array_merge($this->config->blockCloudProviders, $selectors));
+            $fields['block_cloud_providers'] = $valid;
+            if ($invalid !== []) {
+                sort($invalid);
+                $this->log('warning', 'Dynamic rule: ignored unknown cloud providers ' . self::pyList($invalid));
+            }
+            $this->log('info', 'Dynamic rule: Blocked cloud providers ' . self::pyList($valid));
         }
         if ($rules->blockedUserAgents !== []) {
-            $validated = [];
+            $valid = [];
+            $rejected = [];
             foreach ($rules->blockedUserAgents as $pattern) {
-                [$safe, $reason] = Prefilters::validatePatternSafety($pattern, validationCache: $this->validationCache);
+                [$safe, $reason] = Prefilters::validatePatternSafety(
+                    $pattern,
+                    maxContentLength: self::MAX_USER_AGENT_MATCH_LENGTH,
+                    validationCache: $this->validationCache
+                );
                 if ($safe) {
-                    $validated[] = $pattern;
+                    $valid[] = $pattern;
                 } else {
-                    ($this->logger)('warning', "Rejected blocked_user_agents pattern '{$pattern}': {$reason}");
+                    $rejected[] = '(' . SusPatterns::sanitizeForReporting($pattern) . ', ' . $reason . ')';
                 }
             }
-            if ($validated !== []) {
-                $fields['blocked_user_agents'] = array_values(array_merge($this->config->blockedUserAgents, $validated));
+            $fields['blocked_user_agents'] = $valid;
+            if ($rejected !== []) {
+                $this->log('warning', 'Dynamic rule: rejected blocked_user_agents patterns failing the ReDoS validator: [' . implode(', ', $rejected) . ']');
             }
-        }
-        if ($rules->globalRateLimit !== null) {
-            $fields['rate_limit'] = $rules->globalRateLimit;
-        }
-        if ($rules->globalRateWindow !== null) {
-            $fields['rate_limit_window'] = $rules->globalRateWindow;
-        }
-        if ($rules->endpointRateLimits !== []) {
-            // The rule wire format carries [requests, window] pairs; the
-            // config surface takes {limit, window} maps.
-            $converted = [];
-            foreach ($rules->endpointRateLimits as $endpoint => $pair) {
-                $converted[$endpoint] = ['limit' => $pair[0], 'window' => $pair[1]];
-            }
-            $fields['endpoint_rate_limits'] = array_merge($this->config->endpointRateLimits, $converted);
-        }
-        if ($rules->enablePenetrationDetection !== null) {
-            $fields['enable_penetration_detection'] = $rules->enablePenetrationDetection;
-        }
-        if ($rules->enableIpBanning !== null) {
-            $fields['enable_ip_banning'] = $rules->enableIpBanning;
-        }
-        if ($rules->enableRateLimiting !== null) {
-            $fields['enable_rate_limiting'] = $rules->enableRateLimiting;
-        }
-        if ($rules->enableRateLimitAutoBan !== null) {
-            $fields['enable_rate_limit_auto_ban'] = $rules->enableRateLimitAutoBan;
-        }
-        if ($rules->autoBanThreshold !== null) {
-            $fields['auto_ban_threshold'] = $rules->autoBanThreshold;
-        }
-        if ($rules->autoBanDuration !== null) {
-            $fields['auto_ban_duration'] = $rules->autoBanDuration;
-        }
-        if ($rules->emergencyMode) {
-            $fields['emergency_mode'] = true;
-            $fields['emergency_whitelist'] = $rules->emergencyWhitelist;
-            // Emergency mode halves the auto-ban threshold.
-            if (!$rules->emergencyWhitelist || $rules->autoBanThreshold !== null) {
-                $fields['auto_ban_threshold'] = max(1, intdiv($rules->autoBanThreshold ?? $this->config->autoBanThreshold, 2));
-            }
-            ($this->logger)('critical', 'Emergency lockdown mode activated with '
-                . count($rules->emergencyWhitelist) . ' whitelisted entries'
-                . ($rules->emergencyWhitelist !== [] ? ': ' . implode(', ', array_slice($rules->emergencyWhitelist, 0, 10)) : ''));
+            $this->log('info', 'Dynamic rule: Blocked user agents ' . self::pyList(array_map(SusPatterns::sanitizeForReporting(...), $valid)));
         }
         if ($rules->suspiciousPatterns !== []) {
-            // _apply_pattern_rules: every pattern goes through the
-            // detection engine's add_pattern gate (ReDoS-unsafe rows are
-            // rejected there, returning false); the applied list is
-            // reported at info, the rejected at warning. The registrations
-            // are runtime detection state, not config fields - they stay
-            // installed after rule expiry, exactly like the reference
-            // singleton pool.
-            if ($this->susPatterns === null) {
-                ($this->logger)('warning', 'suspicious_patterns from dynamic rules are skipped: no pattern registry is attached to the dynamic rule manager');
-            } else {
-                $added = [];
-                $rejected = [];
-                foreach ($rules->suspiciousPatterns as $pattern) {
-                    if ($this->susPatterns->addPattern($pattern)) {
-                        $added[] = $pattern;
-                    } else {
-                        $rejected[] = $pattern;
-                    }
+            $this->applyPatternRules($rules->suspiciousPatterns);
+        }
+        if ($rules->globalRateLimit || $rules->endpointRateLimits !== []) {
+            if ($rules->globalRateLimit) {
+                $fields['rate_limit'] = $rules->globalRateLimit;
+                if ($rules->globalRateWindow) {
+                    $fields['rate_limit_window'] = $rules->globalRateWindow;
                 }
-                if ($added !== []) {
-                    ($this->logger)('info', 'Dynamic rule: Added suspicious patterns ' . implode(', ', $added));
-                }
-                if ($rejected !== []) {
-                    ($this->logger)('warning', 'Dynamic rule: rejected patterns ' . implode(', ', $rejected));
-                }
+                $this->log('info', "Dynamic rule: Global rate limit {$rules->globalRateLimit} per " . ($rules->globalRateWindow ?? 'null') . 's');
             }
+            if ($rules->endpointRateLimits !== []) {
+                // The rule wire format carries [requests, window] pairs; the
+                // config surface takes {limit, window} maps. The rule's map
+                // replaces the base map.
+                $converted = [];
+                foreach ($rules->endpointRateLimits as $endpoint => $pair) {
+                    $converted[$endpoint] = ['limit' => $pair[0], 'window' => $pair[1]];
+                }
+                $fields['endpoint_rate_limits'] = $converted;
+                $this->log('info', 'Dynamic rule: Applied endpoint-specific rate limits for '
+                    . count($converted) . ' endpoints: ' . self::pyList(array_map(strval(...), array_keys($converted))));
+            }
+        }
+        $toggles = [
+            'enable_penetration_detection' => [$rules->enablePenetrationDetection, 'Penetration detection'],
+            'enable_ip_banning' => [$rules->enableIpBanning, 'IP banning'],
+            'enable_rate_limiting' => [$rules->enableRateLimiting, 'Rate limiting'],
+            'enable_rate_limit_auto_ban' => [$rules->enableRateLimitAutoBan, 'Rate-limit auto-ban'],
+            'auto_ban_threshold' => [$rules->autoBanThreshold, 'Auto-ban threshold'],
+            'auto_ban_duration' => [$rules->autoBanDuration, 'Auto-ban duration'],
+        ];
+        foreach ($toggles as $field => [$value, $label]) {
+            if ($value !== null) {
+                $fields[$field] = $value;
+                $this->log('info', "Dynamic rule: {$label} " . (is_bool($value) ? ($value ? 'True' : 'False') : (string) $value));
+            }
+        }
+        if ($rules->emergencyMode) {
+            $this->log('critical', '[EMERGENCY MODE] ACTIVATED - Enhanced security posture enabled');
+            $original = $fields['auto_ban_threshold'] ?? $base->autoBanThreshold;
+            $fields['emergency_mode'] = true;
+            $fields['emergency_whitelist'] = $rules->emergencyWhitelist;
+            $fields['auto_ban_threshold'] = max(1, intdiv($original, 2));
+            $this->log('warning', "[EMERGENCY MODE] Reduced auto-ban threshold from {$original} to {$fields['auto_ban_threshold']}");
         }
 
         return $fields;
     }
 
-    private function buildCandidateConfig(SecurityConfig $snapshot, DynamicRules $rules): SecurityConfig
+    /**
+     * _apply_pattern_rules: patterns already in the default pool are not
+     * added again, every other pattern goes through the detection engine's
+     * add_pattern gate (ReDoS-unsafe rows are rejected there, returning
+     * false); the applied list is reported at info, the rejected at
+     * warning. The registrations are runtime detection state, not config
+     * fields: they stay installed after rule expiry, exactly like the
+     * reference singleton pool.
+     *
+     * @param list<string> $patterns
+     */
+    private function applyPatternRules(array $patterns): void
     {
-        $fields = $this->ruleFields($rules);
+        if ($this->susPatterns === null) {
+            $this->log('warning', 'suspicious_patterns from dynamic rules are skipped: no pattern registry is attached to the dynamic rule manager');
 
-        return $fields === [] ? $snapshot : $snapshot->with($fields);
+            return;
+        }
+        $known = array_flip($this->susPatterns->getDefaultPatterns());
+        $pending = array_values(array_filter($patterns, static fn (string $p): bool => !isset($known[$p])));
+        $added = [];
+        $rejected = [];
+        foreach ($pending as $pattern) {
+            if ($this->susPatterns->addPattern($pattern)) {
+                $added[] = $pattern;
+            } else {
+                $rejected[] = $pattern;
+            }
+        }
+        if ($added !== []) {
+            $this->log('info', 'Dynamic rule: Added suspicious patterns ' . implode(', ', $added));
+        }
+        if ($rejected !== []) {
+            $this->log('warning', 'Dynamic rule: rejected patterns ' . implode(', ', $rejected));
+        }
+    }
+
+    private function buildCandidateConfig(SecurityConfig $base, DynamicRules $rules): SecurityConfig
+    {
+        $fields = $this->ruleFields($base, $rules);
+        $candidate = $fields === [] ? $base : $base->with($fields);
+        // The pipeline rebuilds when the installed revision changes; with()
+        // always lands on base+1, so lift each candidate past every
+        // revision already installed.
+        while ($candidate !== $base && $candidate->revision() <= $this->maxRevision) {
+            $candidate = $candidate->with([]);
+        }
+
+        return $candidate;
     }
 
     private function installConfig(SecurityConfig $config): void
@@ -406,48 +608,8 @@ final class DynamicRuleManager
         if ($this->applyConfig !== null) {
             ($this->applyConfig)($config);
         }
-    }
-
-    private function sendRuleEvent(string $eventType, DynamicRules $rules, string $actionTaken): void
-    {
-        $this->eventBus?->sendMiddlewareEvent(
-            $eventType,
-            new class {
-                public function state(): object
-                {
-                    return new class {
-                        public ?string $clientIp = 'system';
-                    };
-                }
-
-                public function urlPath(): string
-                {
-                    return '';
-                }
-
-                public function method(): string
-                {
-                    return 'SYSTEM';
-                }
-
-                public function headers(): object
-                {
-                    return new class {
-                        public function get(string $name): ?string
-                        {
-                            return null;
-                        }
-                    };
-                }
-            },
-            $actionTaken,
-            "Dynamic rules {$rules->ruleId} v{$rules->version}",
-            [
-                'rule_id' => $rules->ruleId,
-                'version' => $rules->version,
-                'rule_type' => 'dynamic_rules',
-            ]
-        );
+        $this->installed = $config;
+        $this->maxRevision = max($this->maxRevision, $config->revision());
     }
 
     private function loadLastKnownRules(): ?DynamicRules
@@ -461,12 +623,12 @@ final class DynamicRuleManager
             try {
                 $rules = DynamicRules::loadSnapshot($payload);
             } catch (\Throwable $e) {
-                ($this->logger)('error', 'Discarding unusable last-known dynamic rules payload: ' . $e->getMessage());
+                $this->log('error', 'Discarding unusable last-known dynamic rules payload: ' . $e->getMessage());
 
                 continue;
             }
             if ($this->snapshotExpired($rules)) {
-                ($this->logger)('error', 'Discarding expired last-known dynamic rules '
+                $this->log('error', 'Discarding expired last-known dynamic rules '
                     . $rules->ruleId . ' v' . $rules->version . '; trying the next store');
 
                 continue;
@@ -486,7 +648,7 @@ final class DynamicRuleManager
         try {
             $raw = $this->redisHandler->getKey(self::DYNAMIC_RULES_REDIS_NAMESPACE, self::LAST_KNOWN_RULES_KEY);
         } catch (\Throwable $e) {
-            ($this->logger)('error', 'Failed to read last-known dynamic rules from Redis: ' . $e->getMessage());
+            $this->log('error', 'Failed to read last-known dynamic rules from Redis: ' . $e->getMessage());
 
             return null;
         }
@@ -515,7 +677,7 @@ final class DynamicRuleManager
         try {
             $payload = $rules->dumpSnapshot();
         } catch (\Throwable $e) {
-            ($this->logger)('error', 'Failed to build last-known dynamic rules snapshot: ' . $e->getMessage());
+            $this->log('error', 'Failed to build last-known dynamic rules snapshot: ' . $e->getMessage());
 
             return;
         }
@@ -523,7 +685,7 @@ final class DynamicRuleManager
             try {
                 $this->redisHandler->setKey(self::DYNAMIC_RULES_REDIS_NAMESPACE, self::LAST_KNOWN_RULES_KEY, $payload);
             } catch (\Throwable $e) {
-                ($this->logger)('error', 'Failed to persist dynamic rules to Redis: ' . $e->getMessage());
+                $this->log('error', 'Failed to persist dynamic rules to Redis: ' . $e->getMessage());
             }
         }
         $cachePath = $this->config->dynamicRulesCachePath;
@@ -537,7 +699,7 @@ final class DynamicRuleManager
                 throw new \RuntimeException('atomic write failed');
             }
         } catch (\Throwable $e) {
-            ($this->logger)('error', 'Failed to persist dynamic rules to cache file ' . $cachePath . ': ' . $e->getMessage());
+            $this->log('error', 'Failed to persist dynamic rules to cache file ' . $cachePath . ': ' . $e->getMessage());
         }
     }
 

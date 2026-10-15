@@ -88,14 +88,13 @@ function advanced_config(): SecurityConfig
         // Logging levels for request and suspicious-activity logs.
         logRequestLevel: getenv('LOG_REQUEST_LEVEL') ?: 'INFO',
         logSuspiciousLevel: getenv('LOG_SUSPICIOUS_LEVEL') ?: 'WARNING',
-        // Agent wiring (comment-level): guard-core-php's only telemetry seam
-        // is onBlock. The PHP agent (guard-agent-php,
-        // https://github.com/Guard-Core/guard-agent-php) mirrors the Python
-        // guard-agent's API: once its engine-event pipeline accepts these
-        // payloads, replace the log line below with the agent call and set
-        // GUARD_AGENT_* env vars here. enableAgent stays false because the
-        // engine fails config validation on it (the feature is not ported
-        // yet); do not turn it on.
+        // Agent wiring: the PHP agent (guard-agent-php,
+        // https://github.com/Guard-Core/guard-agent-php) is attached to the
+        // engine (GuardEngine::setAgentHandler(), which the adapters do from
+        // their agentHandler argument). Set enableAgent: true to declare it;
+        // enableDynamicRules and enableEnrichment require it. It stays off
+        // here because the example runs without an agent. onBlock below is
+        // the in-process hook for the same block events.
         onBlock: static function (object $request, array $payload): void {
             file_put_contents('php://stderr', sprintf(
                 "guard blocked %s %s from %s via %s: %s\n",

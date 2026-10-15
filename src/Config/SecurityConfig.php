@@ -175,8 +175,17 @@ final class SecurityConfig
     /** The spec 12 metrics gate (agent_enable_metrics, default true). */
     public readonly bool $agentEnableMetrics;
 
+    /** Whether a guard-agent handler is expected (enable_agent, default false); the dynamic-rule and enrichment gates require it. */
+    public readonly bool $enableAgent;
+
     /** Whether agent-synced dynamic rules are active (enable_dynamic_rules). */
     public readonly bool $dynamicRulesEnabled;
+
+    /** Seconds between dynamic rule fetches (dynamic_rule_interval, default 300, floor 60). */
+    public readonly int $dynamicRuleInterval;
+
+    /** The reference custom_response_modifier: applied to every response the engine returns. */
+    public readonly ?\Closure $customResponseModifier;
 
     /** The guard.* enrichment gate (enable_enrichment, default false). */
     public readonly bool $enableEnrichment;
@@ -355,7 +364,10 @@ final class SecurityConfig
      * @param list<string> $logSensitiveParams
      * @param list<string> $logSensitiveBodyFields
      * @param (\Closure(object, array<string, mixed>): void)|null $onBlock
-     * @param bool|null $enableDynamicRules default false; lets the dashboard change protection at runtime without a code change, and needs an agent handler to deliver the rules: a rule adds the IPs in its ip_blacklist to the blacklist and the IPs in its ip_whitelist to the whitelist (ip_ban_duration is parsed but not applied, these are not timed bans), adds its suspicious_patterns to detection, appends to block_cloud_providers and blocked_user_agents, merges endpoint_rate_limits, and replaces blocked_countries, whitelist_countries, rate_limit, rate_limit_window, enable_penetration_detection, enable_ip_banning, enable_rate_limiting, enable_rate_limit_auto_ban, auto_ban_threshold, auto_ban_duration, emergency_mode and emergency_whitelist (emergency_mode also halves the auto-ban threshold); a rule cannot change any other setting
+     * @param bool|null $enableAgent default false; declares that a guard-agent handler is attached to the engine (GuardEngine::setAgentHandler) and is required by enable_dynamic_rules and enable_enrichment; the engine never builds the agent itself
+     * @param bool|null $enableDynamicRules default false; requires enable_agent; lets the dashboard change protection at runtime without a code change, and needs an agent handler to deliver the rules: a rule bans the IPs in its ip_blacklist (for ip_ban_duration seconds), unbans the IPs in its ip_whitelist, adds its suspicious_patterns to detection, and replaces blocked_countries, whitelist_countries, rate_limit, rate_limit_window, endpoint_rate_limits, block_cloud_providers, blocked_user_agents, enable_penetration_detection, enable_ip_banning, enable_rate_limiting, enable_rate_limit_auto_ban, auto_ban_threshold, auto_ban_duration, emergency_mode and emergency_whitelist (emergency_mode also halves the auto-ban threshold); a rule cannot change any other setting; each new rule version is applied over the base config, never over the previous version
+     * @param int|null $dynamicRuleInterval seconds between dynamic rule fetches (default 300, minimum 60); the engine checks it on every request instead of running a background loop
+     * @param (\Closure(\RenzoFranceschini\GuardCore\Request\GuardResponse): \RenzoFranceschini\GuardCore\Request\GuardResponse)|null $customResponseModifier applied once to every response the engine returns (blocks and redirects) and to pass-through responses through GuardEngine::applyResponseModifier; an exception leaves the response unmodified
      * @param list<string> $emergencyWhitelist
      * @param array<int, string> $customErrorResponses per-status-code body overrides
      * @param list<string> $blockedUserAgents regex patterns, subject truncated to 512 chars
@@ -469,7 +481,9 @@ final class SecurityConfig
         ?bool $enableOtel = null,
         ?bool $enableLogfire = null,
         ?string $logfireServiceName = null,
-        ?string $logFormat = null
+        ?string $logFormat = null,
+        ?int $dynamicRuleInterval = null,
+        ?\Closure $customResponseModifier = null
     ) {
         $this->enableRedis = $enableRedis ?? true;
         $this->redisUrl = $redisUrl;
@@ -673,7 +687,10 @@ final class SecurityConfig
         } else {
             $this->whitelistCountries = [];
             $this->blockedCountries = [];
-            $this->geoIpHandler = null;
+            // An injected resolver is kept (the reference keeps geo_ip_handler
+            // whether or not a country list is set): dynamic country rules
+            // and event country enrichment use it.
+            $this->geoIpHandler = $geoIpHandler;
         }
         $this->geoIpDbPath = $geoIpDbPath;
         // The agent seam (spec 12) is the event bus and metrics collector:
@@ -681,12 +698,30 @@ final class SecurityConfig
         // to the duck-typed handler the adapter attaches.
         $this->agentEnableEvents = $agentEnableEvents ?? true;
         $this->agentEnableMetrics = $agentEnableMetrics ?? true;
+        $this->enableAgent = $enableAgent ?? false;
         $this->dynamicRulesEnabled = $enableDynamicRules ?? false;
+        $this->dynamicRuleInterval = $dynamicRuleInterval ?? 300;
+        if ($this->dynamicRuleInterval < 60) {
+            throw new \InvalidArgumentException('dynamic_rule_interval must be >= 60');
+        }
+        $this->customResponseModifier = $customResponseModifier;
         $this->dynamicRulesCachePath = $dynamicRulesCachePath;
         // The enrichment + observability surface (the reference
         // enable_enrichment / enable_otel / enable_logfire family): the
         // guard.* metadata stamping gate and the two extra composite sinks.
         $this->enableEnrichment = $enableEnrichment ?? false;
+        // The reference validate_agent_config: both agent-gated tiers need
+        // enable_agent. (agent_api_key is not modelled: the PHP engine never
+        // builds the agent, the adapter injects an already-built handler.)
+        if ($this->dynamicRulesEnabled && !$this->enableAgent) {
+            throw new \InvalidArgumentException('enable_agent must be true when enable_dynamic_rules is true');
+        }
+        if ($this->enableEnrichment && !$this->enableAgent) {
+            throw new \InvalidArgumentException(
+                'enable_enrichment requires enable_agent=true; enrichment is the guard-agent-gated tier.'
+                . ' Either enable the agent or set enable_enrichment=false.'
+            );
+        }
         $this->agentProjectId = $agentProjectId;
         $this->otelServiceName = $otelServiceName ?? 'guard-core';
         $this->otelExporterEndpoint = $otelExporterEndpoint;
@@ -923,6 +958,13 @@ final class SecurityConfig
             'redisMaxConnections' => $this->redisMaxConnections,
             'redisRetries' => $this->redisRetries,
             'agentStrict' => $this->agentStrict,
+            'enableAgent' => $this->enableAgent,
+            'enableDynamicRules' => $this->dynamicRulesEnabled,
+            'dynamicRuleInterval' => $this->dynamicRuleInterval,
+            'customResponseModifier' => $this->customResponseModifier,
+            'agentEnableEvents' => $this->agentEnableEvents,
+            'agentEnableMetrics' => $this->agentEnableMetrics,
+            'dynamicRulesCachePath' => $this->dynamicRulesCachePath,
             'customRequestCheck' => $this->customRequestCheck,
             'enableEnrichment' => $this->enableEnrichment,
             'agentProjectId' => $this->agentProjectId,

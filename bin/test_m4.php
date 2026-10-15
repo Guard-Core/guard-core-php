@@ -314,7 +314,7 @@ $t->same(['AWS'], (new SecurityConfig())->with(['block_cloud_providers' => ['AWS
 $t->throws(\InvalidArgumentException::class, fn () => new SecurityConfig(blockCloudProviders: ['AWSX']), 'unknown provider name rejected');
 $t->throws(\InvalidArgumentException::class, fn () => new SecurityConfig(blockCloudProviders: ['aws']), 'provider names case-sensitive');
 $t->throws(\InvalidArgumentException::class, fn () => new SecurityConfig(blockCloudProviders: ['Foo:!region']), 'carve-out on unknown provider rejected');
-$dynamicConfig = new SecurityConfig(enableDynamicRules: true, dynamicRulesCachePath: '/tmp/dynrules.json');
+$dynamicConfig = new SecurityConfig(enableAgent: true, enableDynamicRules: true, dynamicRulesCachePath: '/tmp/dynrules.json');
 $t->same(true, $dynamicConfig->dynamicRulesEnabled, 'dynamic rules un-gated (spec 12 surface)');
 $t->same('/tmp/dynrules.json', $dynamicConfig->dynamicRulesCachePath, 'the last-known cache path is honored');
 $t->same(true, (new SecurityConfig(blockCloudProviders: ['AWS']))->cloudBlockingEnabled(), 'cloudBlockingEnabled true with providers');

@@ -282,7 +282,7 @@ $t->truthy($threw, 'unknown snapshot fields rejected');
 // ---------------------------------------------------------------------
 
 $t->section('update flow gates');
-$config = new SecurityConfig(enableDynamicRules: true);
+$config = new SecurityConfig(enableAgent: true, enableDynamicRules: true);
 $agent = new BusAgent();
 $logs = [];
 $logger = static function (string $level, string $message) use (&$logs): void {
@@ -359,7 +359,8 @@ $payloadAgent->rules = [
     'rule_id' => 'rule-bad',
     'version' => 2,
     'timestamp' => '2026-01-01T00:00:00+00:00',
-    'blocked_countries' => ['BR'],
+    'emergency_mode' => true,
+    'emergency_whitelist' => ['not-an-ip'],
 ];
 $installed = [];
 $manager = new DynamicRuleManager(
@@ -375,13 +376,13 @@ $manager = new DynamicRuleManager(
     }
 );
 $manager->updateRules();
-$t->truthy(count($installed) <= 1, 'at most the base snapshot was re-installed (never the candidate)');
-$t->truthy(count($installed) === 0 || $installed[count($installed) - 1]->blockedCountries === [], 'the currently installed config is the base (fail closed)');
+$t->same([], $installed, 'a candidate that fails validation is never installed (the base stays)');
 $t->truthy($manager->currentRules() === null, 'failed application leaves no current rules');
 $t->truthy((bool) array_filter($logs, static fn (string $l): bool => str_contains($l, 'Failed to apply dynamic rules')), 'the failure is logged');
 
 $t->section('ip, country, cloud and ua rule application');
-$geoConfig = new SecurityConfig(enableDynamicRules: true, geoIpDbPath: 'country.mmdb');
+$geoConfig = new SecurityConfig(enableAgent: true, enableDynamicRules: true, geoIpDbPath: 'country.mmdb');
+$ipBan = new RenzoFranceschini\GuardCore\Ban\IpBanManager([]);
 $payloadAgent->rules = [
     'rule_id' => 'rule-full',
     'version' => 3,
@@ -403,10 +404,12 @@ $manager = new DynamicRuleManager(
     logger: $logger,
     clock: static function () use (&$clock): int {
         return $clock;
-    }
+    },
+    banManager: $ipBan
 );
 $manager->updateRules();
-$t->truthy(in_array('10.0.0.9', $installed[0]->blacklist, true), 'ip blacklist merged');
+$t->truthy($ipBan->isIpBanned('10.0.0.9'), 'ip blacklist is a timed ban');
+$t->same([], $installed[0]->blacklist, 'ip blacklist is not merged into the static blacklist');
 $t->truthy(in_array('BR', $installed[0]->blockedCountries, true), 'countries applied');
 $t->truthy(in_array('AWS', $installed[0]->blockCloudProviders, true), 'cloud providers applied');
 $t->truthy(in_array('[a-z]+bot', $installed[0]->blockedUserAgents, true), 'validated user-agent patterns applied');
@@ -434,7 +437,7 @@ $manager = new DynamicRuleManager(
 );
 $manager->updateRules();
 $t->truthy(!isset($installed[0]) || $installed[0]->blockedUserAgents === [], 'the catastrophic pattern is rejected');
-$t->truthy((bool) array_filter($logs, static fn (string $l): bool => str_contains($l, 'Rejected blocked_user_agents pattern')), 'the rejection is warned');
+$t->truthy((bool) array_filter($logs, static fn (string $l): bool => str_contains($l, 'rejected blocked_user_agents patterns failing the ReDoS validator')), 'the rejection is warned');
 
 $t->section('emergency mode halves the auto-ban threshold');
 $payloadAgent->rules = [
@@ -463,7 +466,7 @@ $manager->updateRules();
 $t->truthy($installed[0]->emergencyMode, 'emergency mode applied');
 $t->same(['10.0.0.1', '10.0.0.2'], $installed[0]->emergencyWhitelist, 'emergency whitelist applied');
 $t->same(5, $installed[0]->autoBanThreshold, 'auto-ban threshold halved');
-$t->truthy((bool) array_filter($logs, static fn (string $l): bool => str_contains($l, 'Emergency lockdown')), 'emergency lockdown logged');
+$t->truthy((bool) array_filter($logs, static fn (string $l): bool => str_contains($l, '[EMERGENCY MODE] ACTIVATED')), 'emergency lockdown logged');
 
 $t->section('expiry restores the base config');
 $clock += 700000000;
@@ -523,7 +526,7 @@ $payloadAgent->rules = [
 ];
 $installed = [];
 $manager = new DynamicRuleManager(
-    config: new SecurityConfig(enableDynamicRules: true, dynamicRulesCachePath: $cachePath),
+    config: new SecurityConfig(enableAgent: true, enableDynamicRules: true, dynamicRulesCachePath: $cachePath),
     agentHandler: $payloadAgent,
     redisHandler: $redis,
     eventBus: new EventBus(new BusAgent(), $config),
@@ -542,7 +545,7 @@ $t->truthy(is_file($cachePath) && str_contains((string) file_get_contents($cache
 
 $hydratedInstalled = [];
 $hydratingManager = new DynamicRuleManager(
-    config: new SecurityConfig(enableDynamicRules: true, dynamicRulesCachePath: $cachePath),
+    config: new SecurityConfig(enableAgent: true, enableDynamicRules: true, dynamicRulesCachePath: $cachePath),
     agentHandler: null,
     redisHandler: $redis,
     eventBus: new EventBus(new BusAgent(), $config),
@@ -568,7 +571,7 @@ $fake->seed('guard_core_rules:dynamic_rules:last_known', (string) json_encode([
     ],
 ]));
 $hydratingManager = new DynamicRuleManager(
-    config: new SecurityConfig(enableDynamicRules: true),
+    config: new SecurityConfig(enableAgent: true, enableDynamicRules: true),
     agentHandler: null,
     redisHandler: $redis,
     eventBus: new EventBus(new BusAgent(), $config),
@@ -586,7 +589,7 @@ $t->truthy($hydratingManager->currentRules() === null, 'an expired snapshot is d
 
 $t->section('no readable store keeps the base config');
 $hydratingManager = new DynamicRuleManager(
-    config: new SecurityConfig(enableDynamicRules: true),
+    config: new SecurityConfig(enableAgent: true, enableDynamicRules: true),
     agentHandler: null,
     redisHandler: null,
     eventBus: new EventBus(new BusAgent(), $config),
@@ -616,7 +619,7 @@ $rules = DynamicRules::fromArray([
     'blocked_cloud_providers' => ['AWS'],
     'blocked_user_agents' => ['bot'],
 ]);
-$configWithGeo = new SecurityConfig(enableDynamicRules: true, geoIpDbPath: 'country.mmdb');
+$configWithGeo = new SecurityConfig(enableAgent: true, enableDynamicRules: true, geoIpDbPath: 'country.mmdb');
 $manager = new DynamicRuleManager(config: $configWithGeo, agentHandler: null, logger: $logger);
 $apply = new ReflectionMethod($manager, 'applyRules');
 $apply->setAccessible(true);
@@ -848,7 +851,7 @@ $t->truthy($enabledManager->lastUpdate() > 0, 'lastUpdate stamped on a successfu
 $t->section('hydration failure is logged, never raised');
 $failInstalled = [];
 $failManager = new DynamicRuleManager(
-    config: new SecurityConfig(enableDynamicRules: true, dynamicRulesCachePath: $cachePath),
+    config: new SecurityConfig(enableAgent: true, enableDynamicRules: true, dynamicRulesCachePath: $cachePath),
     agentHandler: null,
     redisHandler: $redis,
     eventBus: new EventBus(new BusAgent(), $config),
@@ -864,7 +867,7 @@ $failManager->hydrateLastKnownRules();
 $t->truthy((bool) array_filter($logs, static fn (string $l): bool => str_contains($l, 'Failed to hydrate last-known dynamic rules')), 'the hydration failure is logged');
 
 $t->section('full rule field application');
-$geoConfig = new SecurityConfig(enableDynamicRules: true, geoIpDbPath: 'country.mmdb');
+$geoConfig = new SecurityConfig(enableAgent: true, enableDynamicRules: true, geoIpDbPath: 'country.mmdb');
 $payloadAgent->rules = [
     'rule_id' => 'rule-all',
     'version' => 20,
@@ -882,6 +885,8 @@ $payloadAgent->rules = [
 ];
 $installed = [];
 $logs = [];
+$fullBan = new RenzoFranceschini\GuardCore\Ban\IpBanManager([]);
+$fullBan->ban('10.9.9.9', 600, 'seed');
 $fullManager = new DynamicRuleManager(
     config: $geoConfig,
     agentHandler: $payloadAgent,
@@ -892,14 +897,16 @@ $fullManager = new DynamicRuleManager(
     logger: $logger,
     clock: static function () use (&$clock): int {
         return $clock;
-    }
+    },
+    banManager: $fullBan
 );
 $fullManager->updateRules();
 $candidate = $installed[count($installed) - 1] ?? null;
-$t->truthy($candidate !== null && in_array('10.9.9.9', $candidate->whitelist ?? [], true), 'ip whitelist merged');
+$t->same(false, $fullBan->isIpBanned('10.9.9.9'), 'ip whitelist unbans the IP');
+$t->same(null, $candidate->whitelist, 'ip whitelist is not merged into the static whitelist');
 $t->truthy(in_array('DE', $candidate->whitelistCountries, true), 'whitelist countries applied');
-$t->same(120, $candidate->rateLimitWindow, 'global rate window applied');
-$t->truthy(($candidate->endpointRateLimits['/x']['limit'] ?? null) === 7, 'endpoint rate limits merged in the config format');
+$t->same(60, $candidate->rateLimitWindow, 'a global rate window without a global rate limit is ignored');
+$t->truthy(($candidate->endpointRateLimits['/x']['limit'] ?? null) === 7, 'endpoint rate limits applied in the config format');
 $t->same(false, $candidate->enablePenetrationDetection, 'penetration toggle applied');
 $t->same(false, $candidate->enableIpBanning, 'ip banning toggle applied');
 $t->same(true, $candidate->enableRateLimiting, 'rate limiting toggle applied');
@@ -914,7 +921,7 @@ $payloadAgent->rules = [
     'timestamp' => '2026-01-01T00:00:00+00:00',
     'blocked_cloud_providers' => ['AWS'],
 ];
-$cloudyBase = new SecurityConfig(enableDynamicRules: true, blockCloudProviders: ['AWS']);
+$cloudyBase = new SecurityConfig(enableAgent: true, enableDynamicRules: true, blockCloudProviders: ['AWS']);
 $dupInstalled = [];
 $dupManager = new DynamicRuleManager(
     config: $cloudyBase,
@@ -956,7 +963,7 @@ $fakeBroken->failWrites = true;
 $brokenRedis = new RedisHandler(true, 'guard_core_rules2:', connection: $fakeBroken);
 $brokenInstalled = [];
 $brokenManager = new DynamicRuleManager(
-    config: new SecurityConfig(enableDynamicRules: true),
+    config: new SecurityConfig(enableAgent: true, enableDynamicRules: true),
     agentHandler: null,
     redisHandler: $brokenRedis,
     eventBus: new EventBus(new BusAgent(), $config),
@@ -974,7 +981,7 @@ $fake10 = new FakeRespConnection();
 $fake10->seed('guard_core_rules3:dynamic_rules:last_known', '');
 $emptyRedis = new RedisHandler(true, 'guard_core_rules3:', connection: $fake10);
 $emptyManager = new DynamicRuleManager(
-    config: new SecurityConfig(enableDynamicRules: true),
+    config: new SecurityConfig(enableAgent: true, enableDynamicRules: true),
     agentHandler: null,
     redisHandler: $emptyRedis,
     eventBus: new EventBus(new BusAgent(), $config),
@@ -991,7 +998,7 @@ $fakeMalformed = new FakeRespConnection();
 $fakeMalformed->seed('guard_core_rules_malformed:dynamic_rules:last_known', 'this is not json');
 $malformedRedis = new RedisHandler(true, 'guard_core_rules_malformed:', connection: $fakeMalformed);
 $badPayloadManager = new DynamicRuleManager(
-    config: new SecurityConfig(enableDynamicRules: true),
+    config: new SecurityConfig(enableAgent: true, enableDynamicRules: true),
     agentHandler: null,
     redisHandler: $malformedRedis,
     eventBus: new EventBus(new BusAgent(), $config),
@@ -1007,7 +1014,7 @@ $t->truthy((bool) array_filter($logs, static fn (string $l): bool => str_contain
 
 $t->section('unreadable cache file and failed persistence');
 $unreadable = new DynamicRuleManager(
-    config: new SecurityConfig(enableDynamicRules: true, dynamicRulesCachePath: '/proc/self/mem'),
+    config: new SecurityConfig(enableAgent: true, enableDynamicRules: true, dynamicRulesCachePath: '/proc/self/mem'),
     agentHandler: null,
     redisHandler: null,
     eventBus: new EventBus(new BusAgent(), $config),
@@ -1022,7 +1029,7 @@ $unreadable->hydrateLastKnownRules();
 $t->truthy((bool) array_filter($logs, static fn (string $l): bool => str_contains($l, 'Discarding unusable last-known dynamic rules payload')), 'an unreadable cache file yields a discarded empty payload with a log');
 $persistFailLogs = [];
 $persistFailManager = new DynamicRuleManager(
-    config: new SecurityConfig(enableDynamicRules: true, dynamicRulesCachePath: '/dev/null/impossible.json'),
+    config: new SecurityConfig(enableAgent: true, enableDynamicRules: true, dynamicRulesCachePath: '/dev/null/impossible.json'),
     agentHandler: null,
     redisHandler: $brokenRedis,
     eventBus: new EventBus(new BusAgent(), $config),
@@ -1106,7 +1113,7 @@ $t->truthy($futureManager->currentRules() !== null, 'an unexpired rule survives 
 
 $t->section('snapshot build failure keeps the old snapshot');
 $persistFailManager = new DynamicRuleManager(
-    config: new SecurityConfig(enableDynamicRules: true),
+    config: new SecurityConfig(enableAgent: true, enableDynamicRules: true),
     agentHandler: null,
     redisHandler: $brokenRedis,
     eventBus: new EventBus(new BusAgent(), $config),

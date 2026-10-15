@@ -73,12 +73,10 @@ function simple_engine(): GuardEngine
     excludePaths: [
         '/docs', '/redoc', '/openapi.json', '/favicon.ico', '/static', '/health',
     ],
-    // onBlock is the telemetry seam of this port. Guard Agent integration
-    // is not implemented in guard-core-php yet (setting enableAgent fails
-    // config validation), so wire the agent from here: forward these
-    // payloads to guard-agent-php
-    // (https://github.com/Guard-Core/guard-agent-php) once its event pipeline
-    // accepts engine events. The payload carries check_name, reason,
+    // onBlock is the in-process hook for block events. For telemetry attach
+    // guard-agent-php (https://github.com/Guard-Core/guard-agent-php) to the
+    // engine with GuardEngine::setAgentHandler() and set enableAgent: true.
+    // The payload carries check_name, reason,
     // trigger_info, passive_mode, client_ip, path, method, and status_code.
     onBlock: static function (object $request, array $payload): void {
         file_put_contents('php://stderr', sprintf(

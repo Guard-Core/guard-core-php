@@ -67,19 +67,10 @@ final class DynamicRules
                 throw new \InvalidArgumentException("dynamic rules require '{$required}'");
             }
         }
-        $timestamp = \DateTimeImmutable::createFromInterface(new \DateTimeImmutable('now', new \DateTimeZone('UTC')));
-        $parsedTimestamp = strtotime((string) $payload['timestamp']);
-        if ($parsedTimestamp === false) {
-            throw new \InvalidArgumentException('dynamic rules timestamp is unparseable');
-        }
-        $timestamp = new \DateTimeImmutable('@' . $parsedTimestamp);
+        $timestamp = self::instant($payload['timestamp'], 'timestamp');
         $expiresAt = null;
         if (isset($payload['expires_at']) && $payload['expires_at'] !== null) {
-            $parsedExpiry = strtotime((string) $payload['expires_at']);
-            if ($parsedExpiry === false) {
-                throw new \InvalidArgumentException('dynamic rules expires_at is unparseable');
-            }
-            $expiresAt = new \DateTimeImmutable('@' . $parsedExpiry);
+            $expiresAt = self::instant($payload['expires_at'], 'expires_at');
         }
         $endpointRateLimits = [];
         foreach ($payload['endpoint_rate_limits'] ?? [] as $endpoint => $pair) {
@@ -103,18 +94,38 @@ final class DynamicRules
             globalRateLimit: isset($payload['global_rate_limit']) ? (int) $payload['global_rate_limit'] : null,
             globalRateWindow: isset($payload['global_rate_window']) ? (int) $payload['global_rate_window'] : null,
             endpointRateLimits: $endpointRateLimits,
-            blockedCloudProviders: self::stringList($payload['blocked_cloud_providers'] ?? []),
+            blockedCloudProviders: array_values(array_unique(self::stringList($payload['blocked_cloud_providers'] ?? []))),
             blockedUserAgents: self::stringList($payload['blocked_user_agents'] ?? []),
             suspiciousPatterns: self::stringList($payload['suspicious_patterns'] ?? []),
             enablePenetrationDetection: self::nullableBool($payload['enable_penetration_detection'] ?? null),
             enableIpBanning: self::nullableBool($payload['enable_ip_banning'] ?? null),
             enableRateLimiting: self::nullableBool($payload['enable_rate_limiting'] ?? null),
-            autoBanThreshold: isset($payload['auto_ban_threshold']) ? (int) $payload['auto_ban_threshold'] : null,
-            autoBanDuration: isset($payload['auto_ban_duration']) ? (int) $payload['auto_ban_duration'] : null,
+            autoBanThreshold: self::atLeastOne($payload['auto_ban_threshold'] ?? null, 'auto_ban_threshold'),
+            autoBanDuration: self::atLeastOne($payload['auto_ban_duration'] ?? null, 'auto_ban_duration'),
             enableRateLimitAutoBan: self::nullableBool($payload['enable_rate_limit_auto_ban'] ?? null),
             emergencyMode: (bool) ($payload['emergency_mode'] ?? false),
             emergencyWhitelist: self::stringList($payload['emergency_whitelist'] ?? [])
         );
+    }
+
+    /**
+     * Reads a rules object a guard-agent returns (guard-agent-php's
+     * Model\DynamicRules: public camelCase properties) through the same
+     * strict parse as an array payload. Properties the reference model does
+     * not carry (the agent's own extras) are ignored, like pydantic's
+     * default extra handling.
+     */
+    public static function fromObject(object $rules): self
+    {
+        $payload = [];
+        foreach (get_object_vars($rules) as $name => $value) {
+            $payload[strtolower((string) preg_replace('/(?<!^)[A-Z]/', '_$0', (string) $name))] = $value;
+        }
+        if (($payload['timestamp'] ?? null) === null) {
+            $payload['timestamp'] = new \DateTimeImmutable('now', new \DateTimeZone('UTC'));
+        }
+
+        return self::fromArray($payload);
     }
 
     /**
@@ -126,8 +137,8 @@ final class DynamicRules
         $fields = [
             'rule_id' => $this->ruleId,
             'version' => $this->version,
-            'timestamp' => $this->timestamp->format(\DateTimeInterface::ATOM),
-            'expires_at' => $this->expiresAt?->format(\DateTimeInterface::ATOM),
+            'timestamp' => self::utc($this->timestamp),
+            'expires_at' => $this->expiresAt === null ? null : self::utc($this->expiresAt),
             'ttl' => $this->ttl,
             'ip_blacklist' => $this->ipBlacklist,
             'ip_whitelist' => $this->ipWhitelist,
@@ -136,7 +147,8 @@ final class DynamicRules
             'whitelist_countries' => $this->whitelistCountries,
             'global_rate_limit' => $this->globalRateLimit,
             'global_rate_window' => $this->globalRateWindow,
-            'endpoint_rate_limits' => $this->endpointRateLimits,
+            // An empty map must encode as a JSON object (pydantic dumps a dict).
+            'endpoint_rate_limits' => $this->endpointRateLimits === [] ? new \stdClass() : $this->endpointRateLimits,
             'blocked_cloud_providers' => $this->blockedCloudProviders,
             'blocked_user_agents' => $this->blockedUserAgents,
             'suspicious_patterns' => $this->suspiciousPatterns,
@@ -182,6 +194,40 @@ final class DynamicRules
         }
 
         return self::fromArray($decoded['rules']);
+    }
+
+    /** A rule instant as a UTC instant: a DateTimeInterface or any strtotime-parseable string. */
+    private static function instant(mixed $value, string $field): \DateTimeImmutable
+    {
+        if ($value instanceof \DateTimeInterface) {
+            return new \DateTimeImmutable('@' . $value->getTimestamp());
+        }
+        $parsed = is_string($value) ? strtotime($value) : false;
+        if ($parsed === false) {
+            throw new \InvalidArgumentException("dynamic rules {$field} is unparseable");
+        }
+
+        return new \DateTimeImmutable('@' . $parsed);
+    }
+
+    /** The reference JSON rendering of a UTC datetime (pydantic: trailing Z). */
+    private static function utc(\DateTimeImmutable $instant): string
+    {
+        return $instant->setTimezone(new \DateTimeZone('UTC'))->format('Y-m-d\TH:i:s\Z');
+    }
+
+    /** An optional integer field with the reference ge=1 bound. */
+    private static function atLeastOne(mixed $value, string $field): ?int
+    {
+        if ($value === null) {
+            return null;
+        }
+        $int = (int) $value;
+        if ($int < 1) {
+            throw new \InvalidArgumentException("dynamic rules {$field} must be >= 1");
+        }
+
+        return $int;
     }
 
     /** @return list<string> */

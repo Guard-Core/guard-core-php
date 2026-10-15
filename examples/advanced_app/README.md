@@ -96,8 +96,8 @@ curl -s -X POST http://localhost/admin/unban -H 'X-Admin-Token: admin-token-chan
 - `logRequestLevel` / `logSuspiciousLevel`
 - `onBlock` hook: the telemetry seam for
   [guard-agent-php](https://github.com/Guard-Core/guard-agent-php) wiring
-  (comment-level guidance in `src/config.php`; `enableAgent` is fail-closed
-  in this port, so the hook is the integration point)
+  (guidance in `src/config.php`; the agent itself is attached to the engine
+  with `setAgentHandler()` and declared with `enableAgent: true`)
 
 ## Environment variables
 

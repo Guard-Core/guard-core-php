@@ -479,7 +479,7 @@ final class EventsConformanceRunner
         $rules = $drive['rules'];
         $rules['timestamp'] = '2026-01-01T00:00:00+00:00';
         $manager = new DynamicRuleManager(
-            config: new SecurityConfig(enableDynamicRules: true),
+            config: new SecurityConfig(enableAgent: true, enableDynamicRules: true),
             agentHandler: new class($rules) {
                 /** @param array<string, mixed> $rules */
                 public function __construct(private array $rules)

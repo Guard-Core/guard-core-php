@@ -31,6 +31,7 @@ use RenzoFranceschini\GuardCore\Request\GuardResponse;
 use RenzoFranceschini\GuardCore\Request\GuardResponseFactory;
 use RenzoFranceschini\GuardCore\Redis\RedisHandler;
 use RenzoFranceschini\GuardCore\Routing\RouteResolver;
+use RenzoFranceschini\GuardCore\Rules\DynamicRuleManager;
 use RenzoFranceschini\GuardCore\SecurityHeaders\SecurityHeadersPolicy;
 
 final class GuardEngine
@@ -87,18 +88,33 @@ final class GuardEngine
 
     private readonly SecurityCheckPipeline $pipeline;
 
+    private ?DynamicRuleManager $dynamicRuleManager = null;
+
+    private ?object $agentHandler = null;
+
+    private ?\Closure $log;
+
+    private bool $initialized = false;
+
+    /** @var \Closure(): int */
+    private readonly \Closure $clock;
+
     /**
      * @param (\Closure(string, string, array<string, mixed>): void)|null $log
      * @param (\Closure(string): void)|null $warn
+     * @param (\Closure(): int)|null $clock unix time source for the dynamic rule interval (tests)
      */
     public function __construct(
         SecurityConfig $config,
         ?RedisHandler $redis = null,
         ?\Closure $log = null,
         ?\Closure $warn = null,
-        ?CloudManager $cloudManager = null
+        ?CloudManager $cloudManager = null,
+        ?\Closure $clock = null
     ) {
         $this->warn = $warn;
+        $this->log = $log;
+        $this->clock = $clock ?? static fn (): int => time();
         $this->config = $config;
         $this->redis = $redis ?? new RedisHandler(
             enableRedis: $config->enableRedis,
@@ -109,7 +125,7 @@ final class GuardEngine
             healthCheckInterval: $config->redisHealthCheckInterval,
             maxConnections: $config->redisMaxConnections
         );
-        $this->responseFactory = new GuardResponseFactory();
+        $this->responseFactory = new GuardResponseFactory($config->customResponseModifier);
         $this->eventBus = new EventBus(null, $config, countryResolver: static function (string $ip) use ($config): ?string {
             return $config->geoIpHandler?->getCountry($ip);
         });
@@ -244,7 +260,13 @@ final class GuardEngine
 
             return;
         }
+        $this->agentHandler = $agentHandler;
         $this->eventBus->setAgentHandler($agentHandler);
+        // The dynamic rule manager needs the handler: wire it now when the
+        // engine is already initialized (initialize() wires it otherwise).
+        if ($this->initialized) {
+            $this->initializeDynamicRules();
+        }
         // A handler without sendMetric keeps events only: the collector would
         // log a failure for every metric otherwise.
         if (is_callable([$agentHandler, 'sendMetric'])) {
@@ -337,6 +359,18 @@ final class GuardEngine
         return $this->susPatterns;
     }
 
+    /**
+     * The reference apply_modifier over config.custom_response_modifier:
+     * the engine applies it once to every response it returns (after the
+     * security headers, before the CORS verdict headers); adapters call it
+     * for the pass-through responses they send. An exception leaves the
+     * response unmodified.
+     */
+    public function applyResponseModifier(GuardResponse $response): GuardResponse
+    {
+        return $this->responseFactory->applyModifierOnce($response);
+    }
+
     public function responseFactory(): GuardResponseFactory
     {
         return $this->responseFactory;
@@ -357,7 +391,7 @@ final class GuardEngine
         $response = $this->createErrorResponse(500, 'Security check failed');
         $this->applySecurityHeaders($response);
 
-        return $response;
+        return $this->applyResponseModifier($response);
     }
 
     /**
@@ -478,7 +512,76 @@ final class GuardEngine
         return 'cfg_' . spl_object_id($config) . '_' . $base;
     }
 
+    /**
+     * Connects Redis, initializes the ban, rate-limit and cloud state, and
+     * (reference HandlerInitializer.initialize_dynamic_rule_manager) builds
+     * the dynamic rule manager from config when enable_dynamic_rules is on
+     * and an agent handler is attached, hydrating the last-known rules
+     * before the first request.
+     */
     public function initialize(): void
+    {
+        try {
+            $this->initializeState();
+        } finally {
+            $this->initialized = true;
+            $this->initializeDynamicRules();
+        }
+    }
+
+    /**
+     * The dynamic rule manager, once initialize() built it (enable_dynamic_rules
+     * on and an agent handler with getDynamicRules attached); null otherwise.
+     */
+    public function dynamicRuleManager(): ?DynamicRuleManager
+    {
+        return $this->dynamicRuleManager;
+    }
+
+    /**
+     * The reference initialize_dynamic_rule_manager: without an agent the
+     * engine warns and stays on the static config. The reference runs a
+     * background loop; a PHP request process has none, so execute() drives
+     * the manager through its dynamic_rule_interval gate instead.
+     */
+    private function initializeDynamicRules(): void
+    {
+        if (!$this->config->dynamicRulesEnabled || $this->dynamicRuleManager !== null) {
+            return;
+        }
+        if ($this->agentHandler === null || !is_callable([$this->agentHandler, 'getDynamicRules'])) {
+            $message = 'Dynamic rules enabled but agent unavailable; falling back to static config.'
+                . ' Dashboard rule updates will not propagate until agent connectivity is restored.';
+            if ($this->warn !== null) {
+                ($this->warn)($message);
+            } else {
+                error_log('[guard_core] ' . $message);
+            }
+
+            return;
+        }
+        $log = $this->log;
+        $this->dynamicRuleManager = new DynamicRuleManager(
+            config: $this->config,
+            agentHandler: $this->agentHandler,
+            redisHandler: $this->redis->isEnabled() ? $this->redis : null,
+            eventBus: $this->eventBus,
+            applyConfig: fn (SecurityConfig $config) => $this->applyDynamicConfig($config),
+            logger: static function (string $level, string $message) use ($log): void {
+                if ($log !== null) {
+                    $log($level, $message, []);
+                } elseif ($level !== 'info') {
+                    error_log('[guard_core] dynamic rules ' . $level . ': ' . $message);
+                }
+            },
+            clock: $this->clock,
+            susPatterns: $this->susPatterns,
+            banManager: $this->banManager
+        );
+        $this->dynamicRuleManager->hydrateLastKnownRules();
+    }
+
+    private function initializeState(): void
     {
         $status = [
             'redis' => ['enabled' => $this->redis->isEnabled(), 'ok' => true, 'error' => null],
@@ -546,6 +649,7 @@ final class GuardEngine
      */
     public function execute(GuardRequest $request): ?GuardResponse
     {
+        $this->dynamicRuleManager?->maybeUpdate();
         $state = $request->state();
         $state->pipelineStartedAt = hrtime(true) / 1e9;
         $cors = $this->corsPolicy;
@@ -562,6 +666,7 @@ final class GuardEngine
             if ($clientIp === ClientIpResolver::UNKNOWN_CLIENT_IDENTITY && $this->config->failSecure) {
                 $response = $this->unresolvableClientResponse($request);
                 $this->applySecurityHeaders($response, $request);
+                $response = $this->applyResponseModifier($response);
                 $cors?->injectResponseHeaders($response, $request->headers());
 
                 return $response;
@@ -600,12 +705,14 @@ final class GuardEngine
         if ($cors === null) {
             if ($response !== null) {
                 $this->applySecurityHeaders($response, $request);
+                $response = $this->applyResponseModifier($response);
             }
 
             return $response;
         }
         if ($response !== null) {
             $this->applySecurityHeaders($response, $request);
+            $response = $this->applyResponseModifier($response);
             $cors->injectResponseHeaders($response, $request->headers());
 
             return $response;
