@@ -16,7 +16,9 @@ use RenzoFranceschini\GuardCore\Detection\SusPatterns;
 use RenzoFranceschini\GuardCore\Detection\Redos\ValidationCache;
 use RenzoFranceschini\GuardCore\Decorators\SecurityDecorator;
 use RenzoFranceschini\GuardCore\Events\EventBus;
+use RenzoFranceschini\GuardCore\Events\EventFilter;
 use RenzoFranceschini\GuardCore\Events\EventTypes;
+use RenzoFranceschini\GuardCore\Events\MetricsCollector;
 use RenzoFranceschini\GuardCore\Logging\LogRedactor;
 use RenzoFranceschini\GuardCore\Pipeline\BlockEvents;
 use RenzoFranceschini\GuardCore\Pipeline\CheckFactory;
@@ -50,6 +52,8 @@ final class GuardEngine
     private RateLimitHandler $rateLimitHandler;
 
     private readonly EventBus $eventBus;
+
+    private readonly MetricsCollector $metricsCollector;
 
     private readonly RedisHandler $redis;
 
@@ -109,6 +113,14 @@ final class GuardEngine
         $this->eventBus = new EventBus(null, $config, countryResolver: static function (string $ip) use ($config): ?string {
             return $config->geoIpHandler?->getCountry($ip);
         });
+        // No RedisHandler: the per-request metrics only emit once an agent
+        // handler is attached (the reference gate), so nothing queues or
+        // persists before that.
+        $this->metricsCollector = new MetricsCollector(
+            null,
+            $config,
+            new EventFilter($config->mutedEventTypes, $config->mutedMetricTypes)
+        );
         $this->banManager = new IpBanManager($config->trustedProxies, $warn);
         $this->rateLimitHandler = new RateLimitHandler(self::rateLimitConfig($config), warn: $warn);
         $this->cloudManager = $cloudManager ?? ($config->cloudBlockingEnabled() ? new CloudManager() : null);
@@ -201,6 +213,16 @@ final class GuardEngine
     }
 
     /**
+     * The per-request metrics collector (response_time, request_count,
+     * error_rate), fed by processResponse once an agent handler that exposes
+     * sendMetric is attached.
+     */
+    public function metricsCollector(): MetricsCollector
+    {
+        return $this->metricsCollector;
+    }
+
+    /**
      * Attach a duck-typed agent handler (sendEvent(object $event): void,
      * e.g. GuardAgent) to the event bus. Events emitted before this call
      * are queued in the bus and drain on attach. Mirrors the reference
@@ -223,6 +245,11 @@ final class GuardEngine
             return;
         }
         $this->eventBus->setAgentHandler($agentHandler);
+        // A handler without sendMetric keeps events only: the collector would
+        // log a failure for every metric otherwise.
+        if (is_callable([$agentHandler, 'sendMetric'])) {
+            $this->metricsCollector->setAgentHandler($agentHandler);
+        }
     }
 
     /**
@@ -340,17 +367,27 @@ final class GuardEngine
      * process_response): the route's return_pattern rules run first, then
      * the global ones. Return rules never modify the response; a matched
      * rule dispatches its configured action (ban/log/throttle/alert). The
-     * adapter calls this on every pass-through response it sends.
+     * adapter calls this on every pass-through response it sends. It also
+     * emits the per-request metrics (response_time, request_count and, from
+     * 400 up, error_rate) when an agent handler with sendMetric is attached.
      */
     public function processResponse(GuardRequest $request, ?GuardResponse $response): void
     {
-        if ($this->behavioralProcessor === null) {
-            return;
+        if ($this->behavioralProcessor !== null) {
+            $now = microtime(true);
+            $clientIp = $request->state()->clientIp ?? '';
+            $this->behavioralProcessor->processReturnRules($request, $response, $clientIp, $request->state()->routeConfig, $now);
+            $this->behavioralProcessor->processGlobalReturnRules($request, $response, $clientIp, $now);
         }
-        $now = microtime(true);
-        $clientIp = $request->state()->clientIp ?? '';
-        $this->behavioralProcessor->processReturnRules($request, $response, $clientIp, $request->state()->routeConfig, $now);
-        $this->behavioralProcessor->processGlobalReturnRules($request, $response, $clientIp, $now);
+        // The reference response factory collects the request metrics once
+        // per outbound response (metrics.collect_request_metrics), gated by
+        // the attached agent handler and agent_enable_metrics; response_time
+        // runs from the pipeline start.
+        if ($response !== null && $this->metricsCollector->hasAgentHandler()) {
+            $startedAt = $request->state()->pipelineStartedAt;
+            $responseTime = $startedAt === null ? 0.0 : max(0.0, hrtime(true) / 1e9 - $startedAt);
+            $this->metricsCollector->collectRequestMetrics($request, $responseTime, $response->statusCode());
+        }
     }
 
     /**
@@ -510,6 +547,7 @@ final class GuardEngine
     public function execute(GuardRequest $request): ?GuardResponse
     {
         $state = $request->state();
+        $state->pipelineStartedAt = hrtime(true) / 1e9;
         $cors = $this->corsPolicy;
         $preflight = $cors !== null && CorsPolicy::isPreflight($request);
 

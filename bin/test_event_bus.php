@@ -12,6 +12,7 @@ use RenzoFranceschini\GuardCore\Events\SecurityEvent;
 use RenzoFranceschini\GuardCore\Events\SecurityMetric;
 use RenzoFranceschini\GuardCore\Pipeline\SecurityCheckPipeline;
 use RenzoFranceschini\GuardCore\RateLimit\RateLimitHandler;
+use RenzoFranceschini\GuardCore\Request\GuardResponse;
 use RenzoFranceschini\GuardCore\Request\SimpleGuardRequest;
 use RenzoFranceschini\GuardCore\Rules\DynamicRuleManager;
 use RenzoFranceschini\GuardCore\Rules\DynamicRules;
@@ -1121,5 +1122,66 @@ $persistFailManager = new DynamicRuleManager(
 $persistFailLogs = [];
 $persistApply->invoke($persistFailManager, new DynamicRules("\xB1\xB1", 1, new DateTimeImmutable()));
 $t->truthy((bool) array_filter($persistFailLogs, static fn (string $l): bool => str_contains($l, 'Failed to build last-known dynamic rules snapshot')), 'the snapshot build failure is logged');
+
+// ---------------------------------------------------------------------
+// 9. Engine per-request metrics on the response path
+// ---------------------------------------------------------------------
+
+$t->section('engine processResponse emits the request metrics');
+$metricsAgent = new BusAgent();
+$metricsEngine = new GuardEngine(new SecurityConfig(enableRedis: false));
+$metricsEngine->setAgentHandler($metricsAgent);
+$metricsRequest = busRequest('/orders?token=1', 'GET');
+$t->same(null, $metricsEngine->execute($metricsRequest), 'the request passes the pipeline');
+usleep(60000);
+$metricsEngine->processResponse($metricsRequest, new GuardResponse(200));
+$t->same([EventTypes::METRIC_RESPONSE_TIME, EventTypes::METRIC_REQUEST_COUNT], array_map(static fn (SecurityMetric $m): string => $m->metricType, $metricsAgent->metrics), 'a 2xx response emits response_time and request_count');
+$t->truthy($metricsAgent->metrics[0]->value >= 0.05 && $metricsAgent->metrics[0]->value < 5.0, 'response_time is measured from the pipeline start');
+$t->same('200', $metricsAgent->metrics[0]->tags['status'], 'response_time carries the status tag');
+$t->same('GET', $metricsAgent->metrics[1]->tags['method'], 'request_count carries the method tag');
+$metricsAgent->metrics = [];
+$metricsEngine->processResponse($metricsRequest, new GuardResponse(503));
+$t->same([EventTypes::METRIC_RESPONSE_TIME, EventTypes::METRIC_REQUEST_COUNT, EventTypes::METRIC_ERROR_RATE], array_map(static fn (SecurityMetric $m): string => $m->metricType, $metricsAgent->metrics), 'a 5xx response adds error_rate');
+$metricsAgent->metrics = [];
+$metricsEngine->processResponse($metricsRequest, null);
+$t->same([], $metricsAgent->metrics, 'no response, no metrics');
+
+$offAgent = new BusAgent();
+$offEngine = new GuardEngine(new SecurityConfig(enableRedis: false, agentEnableMetrics: false));
+$offEngine->setAgentHandler($offAgent);
+$offRequest = busRequest('/orders', 'GET');
+$offEngine->execute($offRequest);
+$offEngine->processResponse($offRequest, new GuardResponse(200));
+$t->same([], $offAgent->metrics, 'agentEnableMetrics false emits nothing');
+
+$mutedAgent = new BusAgent();
+$mutedEngine = new GuardEngine(new SecurityConfig(enableRedis: false, mutedMetricTypes: [EventTypes::METRIC_REQUEST_COUNT]));
+$mutedEngine->setAgentHandler($mutedAgent);
+$mutedRequest = busRequest('/orders', 'GET');
+$mutedEngine->execute($mutedRequest);
+$mutedEngine->processResponse($mutedRequest, new GuardResponse(200));
+$t->same([EventTypes::METRIC_RESPONSE_TIME], array_map(static fn (SecurityMetric $m): string => $m->metricType, $mutedAgent->metrics), 'muted metric types are not emitted');
+
+$bareEngine = new GuardEngine(new SecurityConfig(enableRedis: false));
+$bareRequest = busRequest('/orders', 'GET');
+$bareEngine->execute($bareRequest);
+$bareEngine->processResponse($bareRequest, new GuardResponse(200));
+$t->same([], $bareEngine->metricsCollector()->drain(), 'with no agent handler nothing queues');
+
+$legacyAgent = new class {
+    /** @var list<object> */
+    public array $received = [];
+
+    public function sendEvent(object $event): void
+    {
+        $this->received[] = $event;
+    }
+};
+$legacyEngine = new GuardEngine(new SecurityConfig(enableRedis: false));
+$legacyEngine->setAgentHandler($legacyAgent);
+$legacyRequest = busRequest('/orders', 'GET');
+$legacyEngine->execute($legacyRequest);
+$legacyEngine->processResponse($legacyRequest, new GuardResponse(200));
+$t->same([], $legacyEngine->metricsCollector()->drain(), 'a handler without sendMetric gets no metrics and nothing queues');
 
 exit($t->finish('EVENT BUS'));
