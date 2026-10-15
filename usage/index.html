@@ -787,21 +787,47 @@ duck-typed <code>sendEvent(SecurityEvent)</code>) attaches via <code>setAgentHan
 adapters can also <code>drain()</code> the queue. Gating: <code>agent_enable_events</code>,
 <code>EventFilter</code> muted types. Send failures log and never raise.
 <code>MetricsCollector</code> mirrors this for <code>response_time</code> / <code>request_count</code> /
-<code>error_rate</code> under <code>agent_enable_metrics</code>. With a wired <code>RedisHandler</code>
-and no agent handler the collector persists the queue under
-<code>{prefix}metrics:pending</code> (a JSON list) so metrics survive across
-requests; attaching a handler or calling <code>drain()</code> flushes the backlog
-in order and clears the key. Redis failures log and never raise.</p>
-<p><code>DynamicRuleManager</code> ports the agent-synced dynamic rules: the update flow
-(expiry, staleness gate, updated/applied events), transactional
-application over the immutable config (<code>SecurityConfig::with()</code> builds the
-full validated candidate; on any failure the previous config stays
-installed - partial application never survives), last-known persistence
-(Redis <code>dynamic_rules:last_known</code> plus an optional atomic file copy), one
-shot hydration at startup, and the <code>match_event</code> correlation. With no
-readable store the manager keeps the base config (fail closed). Enable it
-with <code>enable_dynamic_rules</code> and hand the manager
-<code>$engine-&gt;applyDynamicConfig(...)</code> as its <code>applyConfig</code> seam.</p>
+<code>error_rate</code> under <code>agent_enable_metrics</code>. The engine builds its collector
+without a <code>RedisHandler</code>, so metrics are emitted only once an agent handler
+with <code>sendMetric</code> is attached and nothing is queued or persisted before that.
+A collector you construct yourself with a <code>RedisHandler</code> persists the queue
+under <code>{prefix}metrics:pending</code> (a JSON list) while no handler is attached;
+attaching a handler or calling <code>drain()</code> flushes the backlog in order and
+clears the key. Redis failures log and never raise.</p>
+<p><code>DynamicRuleManager</code> ports the agent-synced dynamic rules. The engine builds
+and drives it from config: with <code>enableAgent</code> and <code>enableDynamicRules</code> set
+and an agent handler attached through <code>setAgentHandler()</code> (it must expose
+<code>getDynamicRules()</code>), <code>GuardEngine::initialize()</code> creates the manager,
+hydrates the last-known rules, and <code>execute()</code> fetches new rules on the first
+request and then every <code>dynamicRuleInterval</code> seconds (default 300, minimum
+60). The reference runs a background loop for this; a PHP request process has
+no background task, so the interval is checked per request instead, with the
+same period (guard-agent-php drives its own rules refresh from <code>tick()</code> for
+the same reason). Without an agent handler the engine warns and stays on the
+static config. Under PHP-FPM each worker keeps its own interval clock, and
+the last-known snapshot (Redis <code>dynamic_rules:last_known</code> or the cache file)
+is what a fresh worker hydrates from.</p>
+<p>A rule is applied exactly as the reference does: <code>ip_blacklist</code> IPs are
+banned for <code>ip_ban_duration</code> seconds and <code>ip_whitelist</code> IPs are unbanned
+(through the engine's ban manager, not the static lists), <code>suspicious_patterns</code>
+join detection unless already present, and <code>blocked_countries</code>,
+<code>whitelist_countries</code>, <code>blocked_cloud_providers</code> (unknown providers dropped),
+<code>blocked_user_agents</code> (ReDoS-validated), <code>endpoint_rate_limits</code>, the global
+rate limit, the feature toggles and the emergency pair REPLACE the matching
+config values. Country rules need a geo resolver, else they are skipped with
+a warning. Emergency mode halves the auto-ban threshold in effect.</p>
+<p>Each new rule version is applied over the base config (the config before the
+first active rule), never over the previous version, so halving and list
+changes never compound. A failed application keeps the previously installed
+config and re-throws, expiry restores the base, and the last-known snapshot
+(Redis plus an optional atomic file copy) is hydrated once at startup. The
+manager also exposes the <code>match_event</code> correlation. Rules arrive as the
+agent's own <code>DynamicRules</code> object, an array or the core <code>DynamicRules</code> model.</p>
+<p><code>customResponseModifier</code> is applied once to every response the engine
+returns (blocks, redirects, failures), after the security headers and before
+the CORS verdict headers; adapters call <code>GuardEngine::applyResponseModifier()</code>
+for the pass-through responses they send. An exception leaves the response
+unmodified.</p>
 <h2 id="conformance">Conformance</h2>
 <p><code>php bin/conformance.php</code> replays the shared JSON fixture corpus
 (<code>conformance/guard-core-spec-4.1.0/</code>) generated from the Python engine

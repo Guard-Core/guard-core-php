@@ -759,7 +759,8 @@
 <p><code>SecurityConfig</code> is built through a single constructor of named arguments
 (every field nullable with an engine default). Arguments belonging to features
 this port does not implement, when set to an enabling value, throw
-<code>UnsupportedFeatureError</code> (fail closed).</p>
+<code>UnsupportedFeatureError</code> (fail closed). Geo blocking, CORS, agent telemetry,
+dynamic rules and the response modifier are implemented and are not among them.</p>
 <h2 id="dynamic-rules">Dynamic rules</h2>
 <table>
 <thead>
@@ -771,9 +772,29 @@ this port does not implement, when set to an enabling value, throw
 </thead>
 <tbody>
 <tr>
+<td><code>enableAgent</code></td>
+<td><code>false</code></td>
+<td>Declares that a guard-agent handler is attached (<code>GuardEngine::setAgentHandler()</code>); required by <code>enableDynamicRules</code> and <code>enableEnrichment</code>. The engine never builds the agent itself</td>
+</tr>
+<tr>
 <td><code>enableDynamicRules</code></td>
 <td><code>false</code></td>
-<td>Lets the dashboard change protection at runtime without a code change. Needs an agent handler to deliver the rules. A rule adds the IPs in its <code>ip_blacklist</code> to the blacklist and the IPs in its <code>ip_whitelist</code> to the whitelist (<code>ip_ban_duration</code> is parsed but not applied, these are not timed bans), adds its <code>suspicious_patterns</code> to detection, appends to <code>block_cloud_providers</code> and <code>blocked_user_agents</code>, merges <code>endpoint_rate_limits</code>, and replaces <code>blocked_countries</code>, <code>whitelist_countries</code>, <code>rate_limit</code>, <code>rate_limit_window</code>, <code>enable_penetration_detection</code>, <code>enable_ip_banning</code>, <code>enable_rate_limiting</code>, <code>enable_rate_limit_auto_ban</code>, <code>auto_ban_threshold</code>, <code>auto_ban_duration</code>, <code>emergency_mode</code> and <code>emergency_whitelist</code>. <code>emergency_mode</code> also halves the auto-ban threshold. A rule cannot change any other setting.</td>
+<td>Requires <code>enableAgent</code>. Lets the dashboard change protection at runtime without a code change. A rule bans the IPs in its <code>ip_blacklist</code> for <code>ip_ban_duration</code> seconds, unbans the IPs in its <code>ip_whitelist</code>, adds its <code>suspicious_patterns</code> to detection, and replaces <code>blocked_countries</code>, <code>whitelist_countries</code>, <code>rate_limit</code>, <code>rate_limit_window</code>, <code>endpoint_rate_limits</code>, <code>block_cloud_providers</code>, <code>blocked_user_agents</code>, <code>enable_penetration_detection</code>, <code>enable_ip_banning</code>, <code>enable_rate_limiting</code>, <code>enable_rate_limit_auto_ban</code>, <code>auto_ban_threshold</code>, <code>auto_ban_duration</code>, <code>emergency_mode</code> and <code>emergency_whitelist</code> (<code>emergency_mode</code> also halves the auto-ban threshold). A rule cannot change any other setting. Each new rule version is applied over the base config, never over the previous version</td>
+</tr>
+<tr>
+<td><code>dynamicRuleInterval</code></td>
+<td><code>300</code></td>
+<td>Seconds between rule fetches, minimum <code>60</code>; checked on every request instead of a background loop</td>
+</tr>
+<tr>
+<td><code>dynamicRulesCachePath</code></td>
+<td><code>null</code></td>
+<td>Optional atomic file copy of the last-known rules snapshot</td>
+</tr>
+<tr>
+<td><code>customResponseModifier</code></td>
+<td><code>null</code></td>
+<td><code>Closure(GuardResponse): GuardResponse</code> applied once to every response the engine returns and, through <code>GuardEngine::applyResponseModifier()</code>, to pass-through responses; an exception leaves the response unmodified</td>
 </tr>
 </tbody>
 </table>
