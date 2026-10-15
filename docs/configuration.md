@@ -70,6 +70,8 @@ KNOWN_GAPS).
 
 `excludedSemanticDetectionHeaders` (global `SecurityConfig` field, default empty, and a `RouteConfig` field that merges with it) is an opt-in list of header names whose values skip the semantic analyzer only: the regex passes still scan them. Names match case-insensitively and trimmed. Use it for values such as JWT session cookies that score near the semantic threshold. The decorator form is `detectionExclusion(semanticHeaders: [...])`.
 
+The `Cookie` header is scanned one `name=value` pair at a time (split on `;`, only spaces trimmed so CR and LF stay, empty pairs skipped), each pair taking the same header path, so a session cookie no longer scores as one blob and the semantic opt-out applies to each pair.
+
 ## Behavior rules
 
 | Argument | Default | Notes |

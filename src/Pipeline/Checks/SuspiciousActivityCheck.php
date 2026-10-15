@@ -290,12 +290,18 @@ final class SuspiciousActivityCheck extends SecurityCheck
             if (isset($this->config->logSensitiveHeaders[strtolower($name)])) {
                 continue;
             }
-            $skipCategories = isset($excludedHeaders[strtolower((string) $name)])
-                ? HeaderExclusions::skipCategories((string) $name, (string) $value)
-                : [];
+            $loweredName = strtolower((string) $name);
             $skipSemantic = isset($semanticHeaders[strtolower(trim((string) $name))]);
-            foreach ($this->scannedValue((string) $value, 'header', "Header '" . strtolower((string) $name) . "': ", $excludedBodyFields, $skipCategories, $skipSemantic) as $entry) {
-                $values[] = $entry;
+            // The Cookie header scans one name=value pair at a time, each pair
+            // through the same excluded/normal header path (_header_items_to_scan).
+            $pairs = strtolower(trim((string) $name)) === 'cookie' ? self::cookiePairs((string) $value) : [(string) $value];
+            foreach ($pairs as $pair) {
+                $skipCategories = isset($excludedHeaders[$loweredName])
+                    ? HeaderExclusions::skipCategories((string) $name, $pair)
+                    : [];
+                foreach ($this->scannedValue($pair, 'header', "Header '" . $loweredName . "': ", $excludedBodyFields, $skipCategories, $skipSemantic) as $entry) {
+                    $values[] = $entry;
+                }
             }
         }
         $body = $request->body();
@@ -307,6 +313,26 @@ final class SuspiciousActivityCheck extends SecurityCheck
         }
 
         return $values;
+    }
+
+    /**
+     * A Cookie header split on ';' into its name=value pairs: only spaces
+     * around a pair are trimmed (so a CR or LF stays in the scanned value)
+     * and empty pairs are skipped (guard-core #162).
+     *
+     * @return list<string>
+     */
+    public static function cookiePairs(string $value): array
+    {
+        $pairs = [];
+        foreach (explode(';', $value) as $pair) {
+            $pair = trim($pair, ' ');
+            if ($pair !== '') {
+                $pairs[] = $pair;
+            }
+        }
+
+        return $pairs;
     }
 
     /**

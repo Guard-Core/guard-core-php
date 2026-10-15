@@ -210,5 +210,27 @@ $mutated = $base->with(['excluded_semantic_detection_headers' => ['x-late']]);
 $t->same([], array_keys($base->excludedSemanticDetectionHeaders), 'with() leaves the original semantic set untouched');
 $t->same(['x-late'], array_keys($mutated->excludedSemanticDetectionHeaders), 'with() carries the new semantic exclusion');
 
+$t->section('the Cookie header scans one name=value pair at a time');
+$enc = static fn (string $raw): string => rtrim(strtr(base64_encode($raw), '+/', '-_'), '=');
+$sig = '';
+for ($i = 0; $i < 64; $i++) {
+    $sig .= chr($i);
+}
+$jwt = $enc('{"alg": "ES256", "typ": "JWT"}') . '.'
+    . $enc('{"sub": "3f2c1b9e-8a47-4d2e-9c1f-5b6a7d8e9f01", "name": "Jane Doe (Acme)", "email": "jane.doe@example.com", "roles": ["admin"], "iat": 1792000000, "exp": 1792000900}') . '.'
+    . $enc($sig);
+$sessionCookie = 'session=' . $jwt . '; theme=system; _ga=GA1.1.123456789.1792000000';
+$t->same(false, blockedHeaders(makeCheck(), ['cookie' => $sessionCookie]), 'a benign session cookie does not score as one semantic blob (each pair scans alone)');
+$t->same(false, blockedHeaders(makeCheck(), ['Cookie' => $sessionCookie]), 'the Cookie header name matches case-insensitively');
+$t->same(true, blockedHeaders(makeCheck(), ['x-session' => $sessionCookie]), 'the same value in another header keeps the whole-value scan');
+$t->same(true, blockedHeaders(makeCheck(), ['cookie' => 'a=1; b=' . SCRIPT . '; c=3']), 'an attack pair in a cookie still blocks');
+$t->same(true, blockedHeaders(makeCheck(), ['cookie' => 'a=1;' . JNDI]), 'a pair with no space after the separator still blocks');
+$t->same(['a=b', 'c=d', "e=\r\nf", "\t"], SuspiciousActivityCheck::cookiePairs("a=b;  c=d ;;e=\r\nf; ;\t"), 'pairs trim spaces only (CR/LF and tab stay) and empty pairs are skipped');
+$t->same([], SuspiciousActivityCheck::cookiePairs(' ; ;'), 'a cookie of empty pairs yields nothing');
+$t->same(true, blockedHeaders(makeCheck($lowThreshold), ['cookie' => SEMANTIC_ONLY]), 'a semantic-only cookie pair blocks with no opt-in');
+$cookieSemanticExcluded = new SecurityConfig(detectionSemanticThreshold: 0.1, excludedSemanticDetectionHeaders: ['Cookie']);
+$t->same(false, blockedHeaders(makeCheck($cookieSemanticExcluded), ['cookie' => 'theme=system; _ga=GA1.1.123456789.1792000000']), 'the semantic opt-out applies to each cookie pair');
+$t->same(true, blockedHeaders(makeCheck($cookieSemanticExcluded), ['cookie' => 'theme=system; b=' . SCRIPT]), 'regex still scans every pair of a semantic-excluded cookie');
+
 echo "\npassed={$t->passed} failed={$t->failed}\n";
 exit($t->failed === 0 ? 0 : 1);
