@@ -152,7 +152,7 @@ return [
     // there (it emits the \xNN reporting escape); the 8.2 matrix jobs run
     // without pcov.
     'src/Detection/SusPatterns.php' => [
-        200, 201,
+        318, 319,
     ],
 
     // The scheme position comes from an https?:// match, so the anchored
@@ -255,7 +255,7 @@ return [
     // as the BehaviorRule entry above). The suites assert the boundary
     // TypeError instead (test_json_logging.php).
     'src/Config/SecurityConfig.php' => [
-        1105, 1129,
+        1120, 1144,
     ],
 
     // 219: the non-array/non-scalar json_decode guard - json_decode can

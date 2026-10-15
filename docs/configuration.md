@@ -161,7 +161,9 @@ rule lists to combine with).
 | `enablePenetrationDetection` | `true` | |
 | `enabledDetectionCategories` | all 19 categories | `xss`, `sqli`, `cmd_injection`, `path_traversal`, and more |
 | `detectionSemanticThreshold` | `0.7` | Semantic model threshold, in `[0.0, 1.0]` |
-| `logSensitiveHeaders` | `[]` | Headers skipped by detection scanning and redacted from logs; use for the address headers (`host`, `x-forwarded-for`, ...) until a dedicated detection-exclusion knob lands |
+| `detectionThreatScoreThreshold` | `1.0` | Anomaly score (sum of regex threat weights) a value must reach to count as a threat, in `[0.0, 10.0]` |
+| `detectionMaxScanSeconds` | `10.0` | Cap on the CPU seconds (process user plus system time, not wall time) spent regex scanning one request, summed across every value and pattern, in `[0.1, 60.0]`. Checked between patterns. Once spent, the remaining patterns and values are not scanned and each scanned view records a weighted `pattern_timeout` threat (`scan_time_budget_exhausted`, category `custom`, weight 1.0) that counts toward the anomaly score, so the request is flagged when `detectionThreatScoreThreshold` is at or below that weight. Where `getrusage()` is unavailable the monotonic wall clock is used instead |
+| `logSensitiveHeaders` | `[]` | Headers skipped by detection scanning and redacted from logs; prefer `excludedDetectionHeaders` for the address headers (`host`, `x-forwarded-for`, ...) |
 
 ## Cloud provider blocking, user agents, auth
 

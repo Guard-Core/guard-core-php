@@ -68,8 +68,27 @@ final class SusPatterns
         return self::$compilerTimeoutOverride ?? self::COMPILER_TIMEOUT;
     }
 
+    /** The pattern name of the weighted pattern_timeout threat recorded once the scan budget is spent. */
+    public const SCAN_TIME_BUDGET_EXHAUSTED_PATTERN = 'scan_time_budget_exhausted';
+
+    /**
+     * Test hook: replaces the CPU clock the per-request scan budget reads
+     * (the equivalent of the reference tests patching _thread_cpu_seconds).
+     * Null uses cpuSeconds().
+     *
+     * @var (\Closure(): float)|null
+     */
+    public static ?\Closure $cpuClock = null;
+
     private Preprocessor $preprocessor;
     private float $semanticThreshold;
+
+    /** The per-request regex scan CPU cap in seconds, null outside a request scan (unbounded). */
+    private ?float $scanCap = null;
+
+    private float $scanSpent = 0.0;
+
+    private bool $scanCapWarned = false;
 
     /**
      * The anomaly score a detect() verdict must reach on the regex-threat
@@ -133,6 +152,105 @@ final class SusPatterns
         $this->patternRedactor = $patternRedactor;
         $this->threatScoreThreshold = $threatScoreThreshold;
         $this->validationCache = $validationCache;
+    }
+
+    /**
+     * CPU seconds consumed by this process (user plus system), the unit of
+     * the per-request scan budget. PHP runs a scan synchronously on one
+     * thread, so the delta of this process clock across a pattern scan is
+     * that scan's CPU time (the reference's time.thread_time). hrtime() is a
+     * wall clock and would charge a request for time spent descheduled.
+     * Where getrusage() is unavailable the monotonic wall clock stands in: it
+     * only ever over-counts, so the cap still bounds a scan.
+     */
+    public static function cpuSeconds(): float
+    {
+        if (self::$cpuClock !== null) {
+            return (self::$cpuClock)();
+        }
+
+        return self::cpuSecondsFrom(function_exists('getrusage') ? getrusage() : false);
+    }
+
+    /**
+     * The clock arithmetic behind cpuSeconds(), split out so the platform
+     * fallback (getrusage() missing or failing) is testable.
+     *
+     * @param array<string, int>|false $usage a getrusage() result
+     */
+    public static function cpuSecondsFrom(array|false $usage): float
+    {
+        if ($usage === false) {
+            return hrtime(true) / 1e9;
+        }
+
+        return $usage['ru_utime.tv_sec'] + $usage['ru_stime.tv_sec']
+            + ($usage['ru_utime.tv_usec'] + $usage['ru_stime.tv_usec']) / 1e6;
+    }
+
+    /**
+     * Opens one request's scan budget (detection_max_scan_seconds): spent
+     * time restarts at zero and every later regex scan is charged to it
+     * until endScan().
+     */
+    public function beginScan(float $maxScanSeconds): void
+    {
+        $this->scanCap = $maxScanSeconds;
+        $this->scanSpent = 0.0;
+        $this->scanCapWarned = false;
+    }
+
+    /** Closes the request scan budget; detect() is unbounded again. */
+    public function endScan(): void
+    {
+        $this->scanCap = null;
+    }
+
+    private function scanBudgetExhausted(): bool
+    {
+        return $this->scanCap !== null && $this->scanCap - $this->scanSpent <= 0.0;
+    }
+
+    /**
+     * Records the weighted pattern_timeout threat for a spent budget on the
+     * scanned view (shape of _scan_time_budget_exhausted_threat).
+     *
+     * @param list<array<string, mixed>> $threats
+     * @param list<string> $matchedPatterns
+     * @param list<string> $timeouts
+     */
+    private function recordBudgetExhausted(string $ip, array &$threats, array &$matchedPatterns, array &$timeouts): void
+    {
+        $pattern = self::SCAN_TIME_BUDGET_EXHAUSTED_PATTERN;
+        if (!$this->scanCapWarned) {
+            $this->scanCapWarned = true;
+            error_log("[guard_core] detection_max_scan_seconds ({$this->scanCap}) reached for client {$ip}; remaining patterns and request values are not scanned");
+        }
+        $threats[] = [
+            'type' => 'pattern_timeout',
+            'pattern' => $pattern,
+            'match' => '',
+            'position' => 0,
+            'execution_time' => 0.0,
+            'category' => 'custom',
+            'weight' => self::resolvePatternWeight($pattern, 'custom'),
+        ];
+        $matchedPatterns[] = $pattern;
+        $timeouts[] = $pattern;
+    }
+
+    /** @return array{0: array<string, mixed>|null, 1: bool} scanPattern() result, its CPU time charged to the budget */
+    private function scanPatternCharged(string $source, string $category, string $content, string $validatorContext, ?array $binaryPrefix): array
+    {
+        if ($this->scanCap === null) {
+            return $this->scanPattern($source, $category, $content, $validatorContext, $binaryPrefix);
+        }
+        $start = self::cpuSeconds();
+        try {
+            return $this->scanPattern($source, $category, $content, $validatorContext, $binaryPrefix);
+        } finally {
+            $this->scanSpent += self::cpuSeconds() - $start;
+        }
     }
 
     public static function normalizeContext(?string $context): string
@@ -404,7 +522,7 @@ final class SusPatterns
         return $nl === false ? strlen($content) : $nl;
     }
 
-    private function checkRegexPatterns(string $content, string $context, string $viewMode): array
+    private function checkRegexPatterns(string $content, string $context, string $viewMode, string $ip = ''): array
     {
         $threats = [];
         $matchedPatterns = [];
@@ -420,6 +538,11 @@ final class SusPatterns
         $binaryPrefix = BinaryPrefix::build($content);
 
         foreach (PatternData::PATTERNS as $index => [$source, $contexts, $category]) {
+            if ($this->scanBudgetExhausted()) {
+                $this->recordBudgetExhausted($ip, $threats, $matchedPatterns, $timeouts);
+
+                return [$threats, $matchedPatterns, $timeouts];
+            }
             if (isset($this->removedDefaultPatterns[$source])) {
                 continue;
             }
@@ -437,7 +560,7 @@ final class SusPatterns
                 continue;
             }
             $startNs = hrtime(true);
-            [$threat, $timeoutOccurred] = $this->scanPattern($source, $category, $content, $validatorContext, $binaryPrefix);
+            [$threat, $timeoutOccurred] = $this->scanPatternCharged($source, $category, $content, $validatorContext, $binaryPrefix);
             $elapsedSeconds = (hrtime(true) - $startNs) / 1e9;
             if ($timeoutOccurred) {
                 $timeouts[] = $source;
@@ -466,8 +589,13 @@ final class SusPatterns
         // the same per-pattern scan gates (canary, budgets, timeouts) and
         // the same per-scan monitor metric as a catalog row.
         foreach ($this->registryPatternSources() as $source) {
+            if ($this->scanBudgetExhausted()) {
+                $this->recordBudgetExhausted($ip, $threats, $matchedPatterns, $timeouts);
+
+                return [$threats, $matchedPatterns, $timeouts];
+            }
             $startNs = hrtime(true);
-            [$threat, $timeoutOccurred] = $this->scanPattern($source, 'custom', $content, $validatorContext, $binaryPrefix);
+            [$threat, $timeoutOccurred] = $this->scanPatternCharged($source, 'custom', $content, $validatorContext, $binaryPrefix);
             $elapsedSeconds = (hrtime(true) - $startNs) / 1e9;
             if ($timeoutOccurred) {
                 $timeouts[] = $source;
@@ -619,22 +747,22 @@ final class SusPatterns
         ];
     }
 
-    private function checkUrlDecodedViewPatterns(string $content, string $context, string $precomputedDecoded, array|bool $decodeBudgetExhausted): array
+    private function checkUrlDecodedViewPatterns(string $content, string $context, string $precomputedDecoded, array|bool $decodeBudgetExhausted, string $ip = ''): array
     {
         $urlDecodedViewContent = Truncation::truncateSafely($precomputedDecoded, $this->preprocessor);
-        [$threats, $matched, $timeouts] = $this->checkRegexPatterns($urlDecodedViewContent, $context, 'url_decoded');
+        [$threats, $matched, $timeouts] = $this->checkRegexPatterns($urlDecodedViewContent, $context, 'url_decoded', $ip);
 
         return [$threats, $matched, $timeouts, $decodeBudgetExhausted];
     }
 
-    private function checkShortBase64AdditiveViewPatterns(string $content, string $context): array
+    private function checkShortBase64AdditiveViewPatterns(string $content, string $context, string $ip = ''): array
     {
         $additiveViewContent = $this->preprocessor->preprocessShortBase64AdditiveView($content);
         if ($additiveViewContent === '') {
             return [[], [], []];
         }
 
-        return $this->checkRegexPatterns($additiveViewContent, $context, 'all');
+        return $this->checkRegexPatterns($additiveViewContent, $context, 'all', $ip);
     }
 
     private function checkSemanticThreats(string $content, string $rawContent): array
@@ -683,10 +811,10 @@ final class SusPatterns
         $decodeBudgetExhausted = [false];
         [$processedContent, $precomputedDecoded] = $this->preprocessor->preprocessWithDecoded($content, $decodeBudgetExhausted);
 
-        [$regexThreats, $matchedPatterns, $timeouts] = $this->checkRegexPatterns($processedContent, $context, 'processed');
+        [$regexThreats, $matchedPatterns, $timeouts] = $this->checkRegexPatterns($processedContent, $context, 'processed', $ip);
 
         $rawViewContent = $this->preprocessor->preprocessSignalPreserving($content);
-        [$rawThreats, $rawMatched, $rawTimeouts] = $this->checkRegexPatterns($rawViewContent, $context, 'raw');
+        [$rawThreats, $rawMatched, $rawTimeouts] = $this->checkRegexPatterns($rawViewContent, $context, 'raw', $ip);
         // A (pattern, match) the processed views already recorded is the same
         // evidence; drop it so a row matching both views counts once. Raw-view
         // timeout sources are deduplicated the same way.
@@ -703,7 +831,7 @@ final class SusPatterns
         }
 
         [$urlDecodedThreats, $urlDecodedMatched, $urlDecodedTimeouts, $urlDecodedBudgetExhausted] =
-            $this->checkUrlDecodedViewPatterns($content, $context, $precomputedDecoded, $decodeBudgetExhausted);
+            $this->checkUrlDecodedViewPatterns($content, $context, $precomputedDecoded, $decodeBudgetExhausted, $ip);
         $regexThreats = array_merge($regexThreats, $urlDecodedThreats);
         $matchedPatterns = array_merge($matchedPatterns, $urlDecodedMatched);
         $timeouts = array_merge($timeouts, $urlDecodedTimeouts);
@@ -721,7 +849,7 @@ final class SusPatterns
             $matchedPatterns[] = $exhaustionThreat['pattern'];
         }
 
-        [$shortBase64Threats, $shortBase64Matched, $shortBase64Timeouts] = $this->checkShortBase64AdditiveViewPatterns($content, $context);
+        [$shortBase64Threats, $shortBase64Matched, $shortBase64Timeouts] = $this->checkShortBase64AdditiveViewPatterns($content, $context, $ip);
         $regexThreats = array_merge($regexThreats, $shortBase64Threats);
         $matchedPatterns = array_merge($matchedPatterns, $shortBase64Matched);
         $timeouts = array_merge($timeouts, $shortBase64Timeouts);

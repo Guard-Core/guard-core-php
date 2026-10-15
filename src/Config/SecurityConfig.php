@@ -121,6 +121,15 @@ final class SecurityConfig
 
     public readonly int $detectionBinaryMinRunLength;
 
+    /**
+     * Cap on the CPU seconds spent regex scanning one request, summed over
+     * every scanned value and pattern (detection_max_scan_seconds, reference
+     * default 10.0, bounds [0.1, 60.0]). Once spent, the remaining patterns
+     * and values are not scanned and each scanned view records a weighted
+     * pattern_timeout threat that counts toward the anomaly score.
+     */
+    public readonly float $detectionMaxScanSeconds;
+
     /** @var array<string, true> */
     public readonly array $excludedDetectionParams;
 
@@ -402,6 +411,7 @@ final class SecurityConfig
         ?float $detectionThreatScoreThreshold = null,
         ?string $detectionPatternValidationCachePath = null,
         ?int $detectionBinaryMinRunLength = null,
+        ?float $detectionMaxScanSeconds = null,
         ?array $excludedDetectionParams = null,
         ?array $excludedDetectionBodyFields = null,
         ?array $excludedDetectionHeaders = null,
@@ -506,6 +516,10 @@ final class SecurityConfig
         $this->detectionBinaryMinRunLength = $detectionBinaryMinRunLength ?? 16;
         if ($this->detectionBinaryMinRunLength < 4 || $this->detectionBinaryMinRunLength > 1024) {
             throw new \InvalidArgumentException('detection_binary_min_run_length must be within [4, 1024]');
+        }
+        $this->detectionMaxScanSeconds = $detectionMaxScanSeconds ?? 10.0;
+        if ($this->detectionMaxScanSeconds < 0.1 || $this->detectionMaxScanSeconds > 60.0) {
+            throw new \InvalidArgumentException('detection_max_scan_seconds must be within [0.1, 60.0]');
         }
         $this->excludedDetectionParams = $this->validateExclusionSet($excludedDetectionParams, 'excluded_detection_params');
         $this->excludedDetectionBodyFields = $this->validateExclusionSet($excludedDetectionBodyFields, 'excluded_detection_body_fields');
@@ -865,6 +879,7 @@ final class SecurityConfig
             'detectionThreatScoreThreshold' => $this->detectionThreatScoreThreshold,
             'detectionPatternValidationCachePath' => $this->detectionPatternValidationCachePath,
             'detectionBinaryMinRunLength' => $this->detectionBinaryMinRunLength,
+            'detectionMaxScanSeconds' => $this->detectionMaxScanSeconds,
             'excludedDetectionParams' => array_keys($this->excludedDetectionParams),
             'excludedDetectionBodyFields' => array_keys($this->excludedDetectionBodyFields),
             'excludedDetectionHeaders' => array_keys($this->excludedDetectionHeaders),

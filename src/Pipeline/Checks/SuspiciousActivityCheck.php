@@ -98,46 +98,73 @@ final class SuspiciousActivityCheck extends SecurityCheck
 
         $categories = [];
         $triggerInfo = '';
-        foreach ($this->scanValues($request) as $entry) {
-            [$content, $context, $forcedCategory, $skipCategories, $label] = $entry;
-            // The optional sixth element marks a value from a header listed in
-            // excluded_semantic_detection_headers: it skips the semantic
-            // analyzer only, the regex passes still scan it.
-            $skipSemantic = $entry[5] ?? false;
-            // An unlabeled value is the whole-body blob: the reference
-            // _scan_blob_body composes "Request body: {trigger}".
-            $prefix = $label !== '' ? $label : 'Request body: ';
-            if ($forcedCategory !== null) {
-                // JSON mongo-operator keys report straight from the walk
-                // (body_json_scan._mongo_operator_key_hit) without a pattern
-                // scan; the walk carries the reference trigger message.
-                if (isset($enabledCategories[$forcedCategory])
-                    && !isset($skipCategories[$forcedCategory])
-                    && !in_array($forcedCategory, $categories, true)
-                ) {
-                    $categories[] = $forcedCategory;
-                    $triggerInfo = $prefix;
-                }
-                continue;
-            }
-            $result = $this->susPatterns->detect($content, $clientIp, $context, $skipSemantic);
-            if ($result['is_threat']) {
-                foreach ($result['threats'] as $threat) {
-                    $category = $threat['category'] ?? 'custom';
-                    // The reference's category gate lives in
-                    // _pattern_should_be_skipped (_suspatterns_regex.py):
-                    // the custom category (runtime registry rows and the
-                    // decode-budget exhaustion marker) bypasses the
-                    // enabled-categories gate entirely.
-                    if (!in_array($category, $categories, true)
-                        && !isset($skipCategories[$category])
-                        && ($category === 'custom' || isset($enabledCategories[$category]))
+        // One request, one scan budget (detection_max_scan_seconds), read from
+        // the live config so a with() revision applies without rebuilding the
+        // shared SusPatterns.
+        $this->susPatterns->beginScan($this->config->detectionMaxScanSeconds);
+        try {
+            foreach ($this->scanValues($request) as $entry) {
+                [$content, $context, $forcedCategory, $skipCategories, $label] = $entry;
+                // The optional sixth element marks a value from a header listed in
+                // excluded_semantic_detection_headers: it skips the semantic
+                // analyzer only, the regex passes still scan it.
+                $skipSemantic = $entry[5] ?? false;
+                // An unlabeled value is the whole-body blob: the reference
+                // _scan_blob_body composes "Request body: {trigger}".
+                $prefix = $label !== '' ? $label : 'Request body: ';
+                if ($forcedCategory !== null) {
+                    // JSON mongo-operator keys report straight from the walk
+                    // (body_json_scan._mongo_operator_key_hit) without a pattern
+                    // scan; the walk carries the reference trigger message.
+                    if (isset($enabledCategories[$forcedCategory])
+                        && !isset($skipCategories[$forcedCategory])
+                        && !in_array($forcedCategory, $categories, true)
                     ) {
-                        $categories[] = $category;
-                        $triggerInfo = $prefix . self::threatMessage($threat);
+                        $categories[] = $forcedCategory;
+                        $triggerInfo = $prefix;
+                    }
+                    continue;
+                }
+                $result = $this->susPatterns->detect($content, $clientIp, $context, $skipSemantic);
+                if ($result['is_threat']) {
+                    // _build_threats_message: a scan time budget threat that
+                    // came after another threat rides along as "; <budget>".
+                    $budgetThreat = null;
+                    foreach ($result['threats'] as $candidate) {
+                        if (($candidate['type'] ?? '') === 'pattern_timeout') {
+                            $budgetThreat = $candidate;
+                            break;
+                        }
+                    }
+                    $reasonSet = false;
+                    foreach ($result['threats'] as $threat) {
+                        $category = $threat['category'] ?? 'custom';
+                        // The reference's category gate lives in
+                        // _pattern_should_be_skipped (_suspatterns_regex.py):
+                        // the custom category (runtime registry rows and the
+                        // decode-budget exhaustion marker) bypasses the
+                        // enabled-categories gate entirely.
+                        if (!in_array($category, $categories, true)
+                            && !isset($skipCategories[$category])
+                            && ($category === 'custom' || isset($enabledCategories[$category]))
+                        ) {
+                            $categories[] = $category;
+                            $isBudget = ($threat['type'] ?? '') === 'pattern_timeout';
+                            if ($isBudget && $reasonSet) {
+                                continue;
+                            }
+                            $message = self::threatMessage($threat);
+                            if (!$isBudget && $budgetThreat !== null) {
+                                $message .= '; ' . self::threatMessage($budgetThreat);
+                            }
+                            $triggerInfo = $prefix . $message;
+                            $reasonSet = true;
+                        }
                     }
                 }
             }
+        } finally {
+            $this->susPatterns->endScan();
         }
 
         if ($categories === []) {
