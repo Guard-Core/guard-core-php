@@ -1136,9 +1136,19 @@ rule lists to combine with).</p>
 <td>Semantic model threshold, in <code>[0.0, 1.0]</code></td>
 </tr>
 <tr>
+<td><code>detectionThreatScoreThreshold</code></td>
+<td><code>1.0</code></td>
+<td>Anomaly score (sum of regex threat weights) a value must reach to count as a threat, in <code>[0.0, 10.0]</code></td>
+</tr>
+<tr>
+<td><code>detectionMaxScanSeconds</code></td>
+<td><code>10.0</code></td>
+<td>Cap on the CPU seconds (process user plus system time, not wall time) spent regex scanning one request, summed across every value and pattern, in <code>[0.1, 60.0]</code>. Checked between patterns. Once spent, the remaining patterns and values are not scanned and each scanned view records a weighted <code>pattern_timeout</code> threat (<code>scan_time_budget_exhausted</code>, category <code>custom</code>, weight 1.0) that counts toward the anomaly score, so the request is flagged when <code>detectionThreatScoreThreshold</code> is at or below that weight. Where <code>getrusage()</code> is unavailable the monotonic wall clock is used instead</td>
+</tr>
+<tr>
 <td><code>logSensitiveHeaders</code></td>
 <td><code>[]</code></td>
-<td>Headers skipped by detection scanning and redacted from logs; use for the address headers (<code>host</code>, <code>x-forwarded-for</code>, ...) until a dedicated detection-exclusion knob lands</td>
+<td>Headers skipped by detection scanning and redacted from logs; prefer <code>excludedDetectionHeaders</code> for the address headers (<code>host</code>, <code>x-forwarded-for</code>, ...)</td>
 </tr>
 </tbody>
 </table>
