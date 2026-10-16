@@ -80,6 +80,20 @@ final class SusPatterns
      */
     public static ?\Closure $cpuClock = null;
 
+    /**
+     * Test hook: replaces the wall clock (nanoseconds) that decides the 2 ms
+     * slice boundaries, so a fake clock can drive the slice deterministically.
+     * Null uses hrtime(true).
+     *
+     * @var (\Closure(): int)|null
+     */
+    public static ?\Closure $wallClockNs = null;
+
+    private static function wallNs(): int
+    {
+        return self::$wallClockNs !== null ? (self::$wallClockNs)() : hrtime(true);
+    }
+
     private Preprocessor $preprocessor;
     private float $semanticThreshold;
 
@@ -87,6 +101,15 @@ final class SusPatterns
     private ?float $scanCap = null;
 
     private float $scanSpent = 0.0;
+
+    /** Wall-clock (hrtime ns) start of the current 2 ms slice; request-scoped, spans values. */
+    private int $sliceStartNs = 0;
+
+    /** CPU clock reading at the last charge of the open pass, null when no pass is charging. */
+    private ?float $cpuMark = null;
+
+    /** Wall-clock span after which a pass charges its CPU (the reference _EVENT_LOOP_SLICE_SECONDS). */
+    private const SLICE_NS = 2_000_000;
 
     private bool $scanCapWarned = false;
 
@@ -198,6 +221,7 @@ final class SusPatterns
         $this->scanCap = $maxScanSeconds;
         $this->scanSpent = 0.0;
         $this->scanCapWarned = false;
+        $this->sliceStartNs = self::wallNs();
     }
 
     /** Closes the request scan budget; detect() is unbounded again. */
@@ -239,17 +263,27 @@ final class SusPatterns
         $timeouts[] = $pattern;
     }
 
-    /** @return array{0: array<string, mixed>|null, 1: bool} scanPattern() result, its CPU time charged to the budget */
+    /** @return array{0: array<string, mixed>|null, 1: bool} scanPattern() result; CPU is charged per pass at slice boundaries */
     private function scanPatternCharged(string $source, string $category, string $content, string $validatorContext, ?array $binaryPrefix): array
     {
-        if ($this->scanCap === null) {
-            return $this->scanPattern($source, $category, $content, $validatorContext, $binaryPrefix);
+        $result = $this->scanPattern($source, $category, $content, $validatorContext, $binaryPrefix);
+        if ($this->cpuMark !== null) {
+            $nowNs = self::wallNs();
+            if ($nowNs - $this->sliceStartNs >= self::SLICE_NS) {
+                $this->chargeInlineCpu();
+                $this->sliceStartNs = $nowNs;
+            }
         }
-        $start = self::cpuSeconds();
-        try {
-            return $this->scanPattern($source, $category, $content, $validatorContext, $binaryPrefix);
-        } finally {
-            $this->scanSpent += self::cpuSeconds() - $start;
+
+        return $result;
+    }
+
+    private function chargeInlineCpu(): void
+    {
+        if ($this->cpuMark !== null) {
+            $now = self::cpuSeconds();
+            $this->scanSpent += $now - $this->cpuMark;
+            $this->cpuMark = $now;
         }
     }
 
@@ -523,6 +557,17 @@ final class SusPatterns
     }
 
     private function checkRegexPatterns(string $content, string $context, string $viewMode, string $ip = ''): array
+    {
+        $this->cpuMark = $this->scanCap === null ? null : self::cpuSeconds();
+        try {
+            return $this->checkRegexPatternsPass($content, $context, $viewMode, $ip);
+        } finally {
+            $this->chargeInlineCpu();
+            $this->cpuMark = null;
+        }
+    }
+
+    private function checkRegexPatternsPass(string $content, string $context, string $viewMode, string $ip = ''): array
     {
         $threats = [];
         $matchedPatterns = [];
