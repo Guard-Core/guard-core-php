@@ -134,6 +134,75 @@ $sus->detect('hello world', '9.9.9.9', 'query_param:q');
 $sus->endScan();
 $t->same(true, $calls < 40, "clock is read a handful of times, not once per catalog pattern ({$calls})");
 
+$t->section('CPU clock is read a small constant number of times per pass');
+$reads = 0;
+SusPatterns::$cpuClock = static function () use (&$reads): float {
+    $reads++;
+
+    return 0.0;
+};
+$sus = new SusPatterns();
+$sus->beginScan(60.0);
+$sus->detect('hello world', '9.9.9.9', 'query_param:q');
+$sus->endScan();
+$t->same(true, $reads >= 2 && $reads <= 12, "one open read and one close read per pass, plus slice charges ({$reads} reads over several hundred patterns)");
+$reads = 0;
+$sus = new SusPatterns();
+$sus->detect('hello world', '9.9.9.9', 'query_param:q');
+$t->same(0, $reads, 'no CPU clock read outside a request scan');
+
+$t->section('a long pass stops at the budget within about one slice');
+// One fake clock shared by wall and CPU: every wall read (one per pattern)
+// advances 1 ms, so a 50 ms cap is spent after about 50 patterns, and the
+// scan may overshoot it by at most one 2 ms slice plus one pattern.
+$fakeNs = 0;
+SusPatterns::$wallClockNs = static function () use (&$fakeNs): int {
+    return $fakeNs += 1_000_000;
+};
+SusPatterns::$cpuClock = static function () use (&$fakeNs): float {
+    return $fakeNs / 1e9;
+};
+$sus = new SusPatterns();
+$sus->beginScan(0.05);
+$result = $sus->detect('hello world', '9.9.9.9', 'query_param:q');
+$spent = (new ReflectionProperty($sus, 'scanSpent'))->getValue($sus);
+$sus->endScan();
+SusPatterns::$wallClockNs = null;
+$t->same(true, in_array(BUDGET_PATTERN, array_column($result['threats'], 'pattern'), true), 'budget threat is recorded');
+$t->same(true, $spent >= 0.05 && $spent <= 0.05 + 0.002 + 0.001, "stopped within about one slice plus one pattern of the cap (charged {$spent} s for a 0.05 s cap)");
+
+$t->section('a budget spent by the last catalog pattern stops before the registry patterns');
+// Every wall read crosses a slice and every CPU read adds one second, so the
+// first pass spends one second per scanned catalog pattern. The smallest cap
+// that still lets the registry pattern run marks the pass's catalog size.
+$wallNs = 0;
+SusPatterns::$wallClockNs = static function () use (&$wallNs): int {
+    return $wallNs += 2_000_000;
+};
+$probe = 'zzregistryprobe';
+$scanWithCap = static function (float $cap) use ($probe): array {
+    fakeClock(1.0);
+    $sus = new SusPatterns();
+    $sus->addPattern($probe, true);
+    $sus->beginScan($cap);
+    $result = $sus->detect($probe, '9.9.9.9', 'unknown');
+    $sus->endScan();
+
+    return array_column($result['threats'], 'pattern');
+};
+$catalogScanned = 0;
+for ($k = 1; $k <= 1000; $k++) {
+    if (in_array($probe, $scanWithCap($k + 0.5), true)) {
+        $catalogScanned = $k;
+        break;
+    }
+}
+$patterns = $scanWithCap($catalogScanned - 0.5);
+SusPatterns::$wallClockNs = null;
+$t->same(true, $catalogScanned > 1, "the first pass scans the catalog before the registry ({$catalogScanned} patterns)");
+$t->same(true, in_array(BUDGET_PATTERN, $patterns, true), 'budget threat is recorded when the last catalog pattern spends it');
+$t->same(false, in_array($probe, $patterns, true), 'the registry pattern is not scanned once the budget is spent');
+
 $t->section('budget is shared across values of one request scan');
 fakeClock(1.0);
 $sus = new SusPatterns();
@@ -189,15 +258,17 @@ fakeClock(1.0);
 [, $reason] = run(makeCheck($config), '/items', ['x-pad' => 'hello']);
 $t->same(false, str_contains($reason, '; ' . BUDGET_MESSAGE), 'budget threat alone has no appended form');
 // Calibrate: how many patterns does an attack header scan across every view?
+// Every wall read crosses a 2 ms slice, so the CPU is charged once per
+// pattern and each pattern costs one clock step, as before per-pass charging.
 $attackHeader = "1' OR '1'='1 UNION SELECT password FROM users--";
-$reads = 0;
-SusPatterns::$cpuClock = static function () use (&$reads): float {
-    $reads++;
-
-    return 0.0;
+$wallNs = 0;
+SusPatterns::$wallClockNs = static function () use (&$wallNs): int {
+    return $wallNs += 2_000_000;
 };
+$wallNs = 0;
+SusPatterns::$cpuClock = static fn (): float => 0.0;
 run(makeCheck(new SecurityConfig(detectionMaxScanSeconds: 60.0)), '/items', ['x-attack' => $attackHeader]);
-$scanned = intdiv($reads, 2);
+$scanned = intdiv($wallNs, 2_000_000);
 // Each pattern costs $step; the 60 s cap is spent late in the request scan,
 // after the attack header has already been scanned.
 $step = 60.0 / ($scanned * 0.85);
@@ -207,6 +278,7 @@ SusPatterns::$cpuClock = static function () use (&$now, $step): float {
 };
 $check = makeCheck(new SecurityConfig(detectionMaxScanSeconds: 60.0));
 [$blocked, $reason] = run($check, '/items', ['x-attack' => $attackHeader]);
+SusPatterns::$wallClockNs = null;
 $t->same(true, $blocked, 'attack header with a mid-scan exhausted budget blocks');
 $t->same(true, str_ends_with($reason, '; ' . BUDGET_MESSAGE), 'reason is "<first threat message>; <budget message>"');
 $t->same(true, str_contains($reason, "Value matched pattern"), 'the first threat message leads the reason');
