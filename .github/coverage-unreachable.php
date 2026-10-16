@@ -152,7 +152,7 @@ return [
     // there (it emits the \xNN reporting escape); the 8.2 matrix jobs run
     // without pcov.
     'src/Detection/SusPatterns.php' => [
-        318, 319,
+        352, 353,
     ],
 
     // The scheme position comes from an https?:// match, so the anchored

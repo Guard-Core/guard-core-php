@@ -171,6 +171,38 @@ SusPatterns::$wallClockNs = null;
 $t->same(true, in_array(BUDGET_PATTERN, array_column($result['threats'], 'pattern'), true), 'budget threat is recorded');
 $t->same(true, $spent >= 0.05 && $spent <= 0.05 + 0.002 + 0.001, "stopped within about one slice plus one pattern of the cap (charged {$spent} s for a 0.05 s cap)");
 
+$t->section('a budget spent by the last catalog pattern stops before the registry patterns');
+// Every wall read crosses a slice and every CPU read adds one second, so the
+// first pass spends one second per scanned catalog pattern. The smallest cap
+// that still lets the registry pattern run marks the pass's catalog size.
+$wallNs = 0;
+SusPatterns::$wallClockNs = static function () use (&$wallNs): int {
+    return $wallNs += 2_000_000;
+};
+$probe = 'zzregistryprobe';
+$scanWithCap = static function (float $cap) use ($probe): array {
+    fakeClock(1.0);
+    $sus = new SusPatterns();
+    $sus->addPattern($probe, true);
+    $sus->beginScan($cap);
+    $result = $sus->detect($probe, '9.9.9.9', 'unknown');
+    $sus->endScan();
+
+    return array_column($result['threats'], 'pattern');
+};
+$catalogScanned = 0;
+for ($k = 1; $k <= 1000; $k++) {
+    if (in_array($probe, $scanWithCap($k + 0.5), true)) {
+        $catalogScanned = $k;
+        break;
+    }
+}
+$patterns = $scanWithCap($catalogScanned - 0.5);
+SusPatterns::$wallClockNs = null;
+$t->same(true, $catalogScanned > 1, "the first pass scans the catalog before the registry ({$catalogScanned} patterns)");
+$t->same(true, in_array(BUDGET_PATTERN, $patterns, true), 'budget threat is recorded when the last catalog pattern spends it');
+$t->same(false, in_array($probe, $patterns, true), 'the registry pattern is not scanned once the budget is spent');
+
 $t->section('budget is shared across values of one request scan');
 fakeClock(1.0);
 $sus = new SusPatterns();
@@ -225,20 +257,28 @@ $t->section('reason text: budget threat first, and appended after another threat
 fakeClock(1.0);
 [, $reason] = run(makeCheck($config), '/items', ['x-pad' => 'hello']);
 $t->same(false, str_contains($reason, '; ' . BUDGET_MESSAGE), 'budget threat alone has no appended form');
-// CPU is charged per pass (a one-second clock step costs two seconds per
-// pass), so sweeping an integer cap lands the exhaustion between the passes
-// of the attack header's detect(): its threat is recorded, then the budget.
+// Calibrate: how many patterns does an attack header scan across every view?
+// Every wall read crosses a 2 ms slice, so the CPU is charged once per
+// pattern and each pattern costs one clock step, as before per-pass charging.
 $attackHeader = "1' OR '1'='1 UNION SELECT password FROM users--";
-$blocked = false;
-$reason = '';
-for ($cap = 1; $cap <= 40; $cap++) {
-    $check = makeCheck(new SecurityConfig(detectionMaxScanSeconds: (float) $cap));
-    fakeClock(1.0);
-    [$blocked, $reason] = run($check, '/items', ['x-attack' => $attackHeader]);
-    if (str_ends_with($reason, '; ' . BUDGET_MESSAGE)) {
-        break;
-    }
-}
+$wallNs = 0;
+SusPatterns::$wallClockNs = static function () use (&$wallNs): int {
+    return $wallNs += 2_000_000;
+};
+$wallNs = 0;
+SusPatterns::$cpuClock = static fn (): float => 0.0;
+run(makeCheck(new SecurityConfig(detectionMaxScanSeconds: 60.0)), '/items', ['x-attack' => $attackHeader]);
+$scanned = intdiv($wallNs, 2_000_000);
+// Each pattern costs $step; the 60 s cap is spent late in the request scan,
+// after the attack header has already been scanned.
+$step = 60.0 / ($scanned * 0.85);
+$now = 0.0;
+SusPatterns::$cpuClock = static function () use (&$now, $step): float {
+    return $now += $step;
+};
+$check = makeCheck(new SecurityConfig(detectionMaxScanSeconds: 60.0));
+[$blocked, $reason] = run($check, '/items', ['x-attack' => $attackHeader]);
+SusPatterns::$wallClockNs = null;
 $t->same(true, $blocked, 'attack header with a mid-scan exhausted budget blocks');
 $t->same(true, str_ends_with($reason, '; ' . BUDGET_MESSAGE), 'reason is "<first threat message>; <budget message>"');
 $t->same(true, str_contains($reason, "Value matched pattern"), 'the first threat message leads the reason');
