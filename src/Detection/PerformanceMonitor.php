@@ -278,6 +278,9 @@ final class PerformanceMonitor
      */
     private function notifyCallbacks(array $anomaly, ?object $agentHandler, ?string $correlationId): void
     {
+        if ($this->anomalyCallbacks === []) {
+            return;
+        }
         $safeAnomaly = MonitorAnomalies::sanitizeAnomalyData($anomaly);
         foreach ($this->anomalyCallbacks as $callback) {
             try {
