@@ -1,5 +1,20 @@
 # Release Notes
 
+v4.4.1 (2026-10-16)
+-------------------
+
+Per-request CPU fix for the scan time budget and the performance monitor (v4.4.1)
+---------------------------------------------------------------------------------
+
+A release in lockstep with the core engines at 4.4.1.
+
+### Fixed
+
+- **The scan time budget charges CPU once per pass instead of once per pattern** (PR #94, issue #93). Each pattern check read `getrusage()` twice (allocating an array each time) whenever a budget was active. A pass now reads the CPU clock once when it opens, compares `hrtime` against the request's 2 ms slice after each pattern and charges the CPU clock only when the slice has elapsed, and makes a final charge when it closes. The slice starts with `beginScan`, so it spans values, the per-pattern exhausted check stays arithmetic only, and the cap still stops a long scan within about one slice. Detection CPU on a ~1.1 KB JSON-like body plus 10 headers went from 17.6 ms to 15.1 ms.
+- **The performance monitor skips the sanitized anomaly copy when no callback is registered** (PR #94, issue #93).
+
+___
+
 v4.4.0 (2026-10-15)
 -------------------
 
