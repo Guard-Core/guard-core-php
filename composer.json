@@ -3,6 +3,14 @@
     "description": "PHP port of guard-core: behavioral WAF engine (detection engine conformance milestone)",
     "type": "library",
     "license": "MIT",
+    "authors": [
+        {
+            "name": "Renzo Franceschini",
+            "email": "rennf93@guard-core.com",
+            "homepage": "https://github.com/rennf93",
+            "role": "Maintainer"
+        }
+    ],
     "require": {
         "php": "^8.2",
         "ext-pcre": "*",
