@@ -7,7 +7,7 @@ WORKDIR /app
 COPY composer.json composer.lock ./
 RUN composer install --no-interaction --no-progress
 
-FROM php:8.3-cli
+FROM php:8.3.36-cli
 
 RUN useradd --create-home --uid 1000 guard
 
